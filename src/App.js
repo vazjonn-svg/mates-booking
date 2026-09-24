@@ -1532,16 +1532,40 @@ export default function App() {
       .then(() => showToast("Config copied — paste it into Settings on your other computer"))
       .catch(() => showToast("Couldn't copy — check clipboard permissions", "error"));
   };
-  const importConfig = () => {
+  // Real file download, not just clipboard — cleaner to email/AirDrop as an
+  // attachment than pasting a big JSON blob directly into a message.
+  const downloadConfig = () => {
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${slugify(STUDIO_NAME)}-config.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("Config file downloaded");
+  };
+  const applyImportedConfigText = text => {
     try {
-      const parsed = JSON.parse(configImportText);
+      const parsed = JSON.parse(text);
       if (!parsed.rooms || !parsed.gear) throw new Error("missing rooms/gear");
       updateConfig(parsed);
-      setConfigImportText(""); setShowConfigImport(false);
       showToast("Settings imported");
+      return true;
     } catch {
       showToast("That doesn't look like valid config JSON", "error");
+      return false;
     }
+  };
+  const importConfig = () => {
+    if (applyImportedConfigText(configImportText)) { setConfigImportText(""); setShowConfigImport(false); }
+  };
+  const importConfigFile = file => {
+    const reader = new FileReader();
+    reader.onload = e => applyImportedConfigText(e.target.result);
+    reader.onerror = () => showToast("Couldn't read that file", "error");
+    reader.readAsText(file);
   };
 
   const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
@@ -3160,8 +3184,10 @@ export default function App() {
 
             {/* Sync between computers */}
             <Sect>Sync Settings Between Computers</Sect>
-            <div style={{ display: "flex", gap: 8, marginBottom: showConfigImport ? 12 : 0 }}>
+            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 12 }}>Copy/paste works fine between two computers you're sitting at. Download a file instead if you want to email it or send it some other way.</p>
+            <div style={{ display: "flex", gap: 8, marginBottom: showConfigImport ? 12 : 0, flexWrap: "wrap" }}>
               <button onClick={exportConfig} style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.text, border: `1px solid ${C.border}`, fontWeight: "500" }}>📋 Copy Config</button>
+              <button onClick={downloadConfig} style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.text, border: `1px solid ${C.border}`, fontWeight: "500" }}>💾 Download Config File</button>
               <button onClick={() => setShowConfigImport(s => !s)} style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.text, border: `1px solid ${C.border}`, fontWeight: "500" }}>{showConfigImport ? "Cancel Import" : "⇩ Import Config"}</button>
             </div>
             {showConfigImport && (
@@ -3169,7 +3195,14 @@ export default function App() {
                 <textarea value={configImportText} onChange={e => setConfigImportText(e.target.value)} rows={6}
                   placeholder="Paste the config JSON copied from the other computer here…"
                   style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 12.5, fontFamily: FONT.mono, resize: "vertical", boxSizing: "border-box", marginBottom: 10 }} />
-                <button onClick={importConfig} style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: C.accent, color: C.accentText, border: "none", fontWeight: "500" }}>Apply Imported Config</button>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={importConfig} style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: C.accent, color: C.accentText, border: "none", fontWeight: "500" }}>Apply Pasted Config</button>
+                  <span style={{ fontSize: 11.5, color: C.textFaint }}>or</span>
+                  <label style={{ padding: "9px 18px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.text, border: `1px solid ${C.border}`, fontWeight: "500" }}>
+                    📁 Choose Config File…
+                    <input type="file" accept=".json,application/json" onChange={e => e.target.files[0] && importConfigFile(e.target.files[0])} style={{ display: "none" }} />
+                  </label>
+                </div>
               </div>
             )}
           </div>
