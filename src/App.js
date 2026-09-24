@@ -374,6 +374,30 @@ function persistClient(c) {
   if (idx >= 0) all[idx] = { ...all[idx], ...c }; else all.unshift(c);
   localStorage.setItem(CLIENTS_KEY, JSON.stringify(all.slice(0, 300)));
 }
+// Merges this browser's locally-saved clients with everyone's shared Contacts
+// sheet — by email, so a client saved from either computer shows up for both.
+// When both sides know the same client, whichever has the more recent
+// "last booked" date wins for the room/date fields (the sheet is usually the
+// more complete picture, but a very recent local booking may not have synced
+// to the sheet yet).
+function mergeClientRecords(local, sheetRows) {
+  const byEmail = new Map();
+  for (const c of local) {
+    if (c.email) byEmail.set(c.email.toLowerCase(), c);
+  }
+  for (const row of sheetRows) {
+    const [band, name, email, lastRoom, lastBooked] = row;
+    if (!email) continue;
+    const key = email.toLowerCase();
+    const existing = byEmail.get(key);
+    const incoming = { band, name, email, lastRoom, lastBooked };
+    if (!existing) { byEmail.set(key, incoming); continue; }
+    const existingDate = existing.lastBooked ? new Date(existing.lastBooked).getTime() : 0;
+    const incomingDate = lastBooked ? new Date(lastBooked).getTime() : 0;
+    byEmail.set(key, incomingDate >= existingDate ? { ...existing, ...incoming } : { ...incoming, ...existing });
+  }
+  return [...byEmail.values()];
+}
 
 // ─── Google OAuth ─────────────────────────────────────────────────────────────
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID || "";
@@ -1439,6 +1463,25 @@ export default function App() {
   const [clientSearch, setClientSearch] = useState("");
   const [showDrop, setShowDrop] = useState(false);
   const dropRef = useRef(null);
+
+  // Pulls in the shared Contacts sheet once a token's available, merges it
+  // with whatever's saved locally, and — importantly — writes the merged
+  // result back to local storage too, so a contact synced from the sheet is
+  // still there next time even if this fetch fails (offline, API hiccup).
+  useEffect(() => {
+    if (!token || !config.contactsSheetId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await sheetsGetValues(token, config.contactsSheetId, "A2:E");
+        if (cancelled) return;
+        const merged = mergeClientRecords(loadClients(), rows);
+        localStorage.setItem(CLIENTS_KEY, JSON.stringify(merged.slice(0, 300)));
+        setClients(merged);
+      } catch (e) { console.error("Contacts sheet fetch:", e); }
+    })();
+    return () => { cancelled = true; };
+  }, [token, config.contactsSheetId]);
 
   // Live rooms/gear config — seeded from localStorage (or defaults), editable from Settings.
   const [config, setConfigState] = useState(getConfig);
