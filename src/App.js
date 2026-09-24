@@ -39,25 +39,25 @@ const CONFIG_STORAGE_KEY = "matesBookingConfig_v1";
 //      (it usually looks like a long string ending in @group.calendar.google.com)
 //   4. Paste it in via the Settings tab, or directly below
 const DEFAULT_ROOMS = {
-  "Studio A":      { address: "5412 Cleon Ave, North Hollywood, CA 91601",     locationName: "Mates Cleon",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_A_CALENDAR_ID",      hourly: 65,   daily: 550 },
-  "Studio B":      { address: "5412 Cleon Ave, North Hollywood, CA 91601",     locationName: "Mates Cleon",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_B_CALENDAR_ID",      hourly: 65,   daily: 550 },
-  "Stage C":       { address: "5412 Cleon Ave, North Hollywood, CA 91601",     locationName: "Mates Cleon",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_C_CALENDAR_ID",       hourly: null, daily: 750 },
-  "Chandler Room": { address: "5412 Cleon Ave, North Hollywood, CA 91601",     locationName: "Mates Cleon",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_CHANDLER_ROOM_CALENDAR_ID", hourly: 75,   daily: 650 },
-  "Gold Room":     { address: "5528 Vineland Ave, North Hollywood, CA 91601",  locationName: "Mates Vineland",  gateCode: "2020", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_GOLD_ROOM_CALENDAR_ID",     hourly: 65,   daily: 550 },
-  "Chino Room":    { address: "5528 Vineland Ave, North Hollywood, CA 91601",  locationName: "Mates Vineland",  gateCode: "2020", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_CHINO_ROOM_CALENDAR_ID",    hourly: 75,   daily: 650 },
-  "Stage D":       { address: "5528 Vineland Ave, North Hollywood, CA 91601",  locationName: "Mates Vineland",  gateCode: "2020", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_STAGE_D_CALENDAR_ID",       hourly: null, daily: 850 },
-  "Stage West":    { address: "15814 Strathern St, Van Nuys, CA 91406",        locationName: "Mates Strathern", gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_WEST_CALENDAR_ID",    hourly: null, daily: 950 },
+  "Studio A":      { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_A_CALENDAR_ID",      hourly: null, daily: null },
+  "Studio B":      { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_B_CALENDAR_ID",      hourly: null, daily: null },
+  "Stage C":       { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_C_CALENDAR_ID",       hourly: null, daily: null },
+  "Chandler Room": { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_CHANDLER_ROOM_CALENDAR_ID", hourly: null, daily: null },
+  "Gold Room":     { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_GOLD_ROOM_CALENDAR_ID",     hourly: null, daily: null },
+  "Chino Room":    { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_CHINO_ROOM_CALENDAR_ID",    hourly: null, daily: null },
+  "Stage D":       { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_STAGE_D_CALENDAR_ID",       hourly: null, daily: null },
+  "Stage West":    { address: "",        locationName: "", gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_WEST_CALENDAR_ID",    hourly: null, daily: null },
 };
 
 const DEFAULT_GEAR = [
-  { name: "Wireless Mic",    rate: 85  },
-  { name: "In-Ear Monitors", rate: 85  },
-  { name: "Drum Kit",        rate: 150 },
-  { name: "Bass Amp",        rate: 50  },
-  { name: "Guitar Amp",      rate: 50  },
-  { name: "Cymbals",         rate: 85  },
-  { name: "Snare Drum",      rate: 35  },
-  { name: "Keyboard",        rate: 150 },
+  { name: "Wireless Mic",    rate: 0 },
+  { name: "In-Ear Monitors", rate: 0 },
+  { name: "Drum Kit",        rate: 0 },
+  { name: "Bass Amp",        rate: 0 },
+  { name: "Guitar Amp",      rate: 0 },
+  { name: "Cymbals",         rate: 0 },
+  { name: "Snare Drum",      rate: 0 },
+  { name: "Keyboard",        rate: 0 },
 ];
 
 const DEFAULT_NIGHT_CREW = []; // { name, email } — managed in Settings, checked off per rundown
@@ -108,11 +108,14 @@ function getRoomColor(room) {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const STUDIO_NAME  = "Mates Studios";
-const STUDIO_EMAIL = "rehearsals@matesinc.com";
-const STUDIO_PHONE = "(818) 209-4742";
-const STUDIO_ZELLE = "billing@matesinc.com";
-const STUDIO_PORTAL_URL = "https://matespayments.com/web/";
+// Kept out of the public source the same way the Google Client ID already is
+// — real values live in your own .env (git-ignored), generic fallbacks here
+// so the code itself doesn't identify which business is running it.
+const STUDIO_NAME  = process.env.REACT_APP_STUDIO_NAME  || "Your Studio Name";
+const STUDIO_EMAIL = process.env.REACT_APP_STUDIO_EMAIL || "bookings@example.com";
+const STUDIO_PHONE = process.env.REACT_APP_STUDIO_PHONE || "";
+const STUDIO_ZELLE  = process.env.REACT_APP_STUDIO_ZELLE || "";
+const STUDIO_PORTAL_URL = process.env.REACT_APP_STUDIO_PORTAL_URL || "";
 
 const STEPS = ["details", "review", "confirm"];
 
@@ -1243,7 +1246,7 @@ export default function App() {
   const [rundownLoading, setRundownLoading] = useState(false);
   const [todayEvents, setTodayEvents] = useState([]); // "Today" section — always the real current date, not navigable
   const [todayLoading, setTodayLoading] = useState(false);
-  const [checkedCrew, setCheckedCrew] = useState(() => new Set(getConfig().nightCrew.map((_, i) => i)));
+  const [checkedCrew, setCheckedCrew] = useState(() => new Set());
   const [sendingRundown, setSendingRundown] = useState(false);
   const [rundownSent, setRundownSent] = useState(false);
 
@@ -2901,6 +2904,13 @@ export default function App() {
               <div style={{ color: C.textFaint, fontSize: 13, padding: "8px 0 20px" }}>No one's on the roster yet — add crew members in Settings first.</div>
             ) : (
               <div style={{ marginBottom: 20 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", padding: "6px 0 10px", marginBottom: 4, borderBottom: `1px solid ${C.borderSoft}` }}
+                  onClick={() => setCheckedCrew(checkedCrew.size === config.nightCrew.length ? new Set() : new Set(config.nightCrew.map((_, i) => i)))}>
+                  <div style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${C.border}`, background: checkedCrew.size === config.nightCrew.length ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {checkedCrew.size === config.nightCrew.length && <span style={{ color: C.accentText, fontSize: 10, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                  </div>
+                  <span style={{ fontSize: 12.5, color: C.textMuted, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.03em" }}>Select All</span>
+                </label>
                 {config.nightCrew.map((p, i) => (
                   <label key={i} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", padding: "6px 0" }} onClick={() => toggleCrewChecked(i)}>
                     <div style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${C.border}`, background: checkedCrew.has(i) ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
