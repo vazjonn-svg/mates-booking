@@ -1464,6 +1464,9 @@ export default function App() {
   const [showDrop, setShowDrop] = useState(false);
   const dropRef = useRef(null);
 
+  // Live rooms/gear config — seeded from localStorage (or defaults), editable from Settings.
+  const [config, setConfigState] = useState(getConfig);
+
   // Pulls in the shared Contacts sheet once a token's available, merges it
   // with whatever's saved locally, and — importantly — writes the merged
   // result back to local storage too, so a contact synced from the sheet is
@@ -1482,9 +1485,6 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [token, config.contactsSheetId]);
-
-  // Live rooms/gear config — seeded from localStorage (or defaults), editable from Settings.
-  const [config, setConfigState] = useState(getConfig);
   const [gearSearch, setGearSearch] = useState("");
   const [configImportText, setConfigImportText] = useState("");
   const [showConfigImport, setShowConfigImport] = useState(false);
