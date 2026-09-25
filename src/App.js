@@ -39,14 +39,14 @@ const CONFIG_STORAGE_KEY = "matesBookingConfig_v1";
 //      (it usually looks like a long string ending in @group.calendar.google.com)
 //   4. Paste it in via the Settings tab, or directly below
 const DEFAULT_ROOMS = {
-  "Studio A":      { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_A_CALENDAR_ID",      hourly: null, daily: null },
-  "Studio B":      { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STUDIO_B_CALENDAR_ID",      hourly: null, daily: null },
-  "Stage C":       { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_C_CALENDAR_ID",       hourly: null, daily: null },
-  "Chandler Room": { address: "",     locationName: "",    gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_CHANDLER_ROOM_CALENDAR_ID", hourly: null, daily: null },
-  "Gold Room":     { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_GOLD_ROOM_CALENDAR_ID",     hourly: null, daily: null },
-  "Chino Room":    { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_CHINO_ROOM_CALENDAR_ID",    hourly: null, daily: null },
-  "Stage D":       { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", calendarId: "REPLACE_WITH_STAGE_D_CALENDAR_ID",       hourly: null, daily: null },
-  "Stage West":    { address: "",        locationName: "", gateCode: "",     accessNote: "",                                                                       calendarId: "REPLACE_WITH_STAGE_WEST_CALENDAR_ID",    hourly: null, daily: null },
+  "Studio A":      { address: "",     locationName: "",    gateCode: "",     accessNote: "", description: "",                                                       calendarId: "REPLACE_WITH_STUDIO_A_CALENDAR_ID",      hourly: null, daily: null },
+  "Studio B":      { address: "",     locationName: "",    gateCode: "",     accessNote: "", description: "",                                                       calendarId: "REPLACE_WITH_STUDIO_B_CALENDAR_ID",      hourly: null, daily: null },
+  "Stage C":       { address: "",     locationName: "",    gateCode: "",     accessNote: "", description: "",                                                       calendarId: "REPLACE_WITH_STAGE_C_CALENDAR_ID",       hourly: null, daily: null },
+  "Chandler Room": { address: "",     locationName: "",    gateCode: "",     accessNote: "", description: "",                                                       calendarId: "REPLACE_WITH_CHANDLER_ROOM_CALENDAR_ID", hourly: null, daily: null },
+  "Gold Room":     { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", description: "", calendarId: "REPLACE_WITH_GOLD_ROOM_CALENDAR_ID",     hourly: null, daily: null },
+  "Chino Room":    { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", description: "", calendarId: "REPLACE_WITH_CHINO_ROOM_CALENDAR_ID",    hourly: null, daily: null },
+  "Stage D":       { address: "",  locationName: "",  gateCode: "", accessNote: "This location has a gated entrance. Use the gate code below upon arrival.", description: "", calendarId: "REPLACE_WITH_STAGE_D_CALENDAR_ID",       hourly: null, daily: null },
+  "Stage West":    { address: "",        locationName: "", gateCode: "",     accessNote: "", description: "",                                                       calendarId: "REPLACE_WITH_STAGE_WEST_CALENDAR_ID",    hourly: null, daily: null },
 };
 
 const DEFAULT_GEAR = [
@@ -153,7 +153,7 @@ const EMPTY_FORM = {
   replyThreadId: null, replyMessageId: null, replyCc: "", // set when staff pick a thread to reply into
   staffAttention: false, // manual "needs booking staff attention" flag
   discountEnabled: false, discountMode: "percent", discountTarget: "total", discountValue: "",
-  hidePricingInEmail: false, // client email decision only — the Review screen still shows real numbers to staff
+  hidePricingInEmail: true, // defaults ON — pricing/rentals stay off the client email unless staff opts in; the Review screen still shows real numbers to staff either way
   customGreeting: "", // empty = use the auto-generated "Hi [First Name]..." line
   attachPolicy: true, // whether to attach the relevant booking policy PDF (if one's configured in Settings)
   createdEventId: null, createdEventCalendarId: null, // tentative event created at Preview time
@@ -170,6 +170,13 @@ function newSessionRow(room = "", rates = { hourly: null, daily: null }, type = 
     hourlyRate: rates.hourly ?? "", dailyRate: rates.daily ?? "",
     createdEventId: null, createdEventCalendarId: null,
   };
+}
+// A candidate date/time a client could work with — Quote checks every
+// eligible room against each of these, independent of the others.
+let _quoteSlotKeyCounter = 0;
+function newQuoteSlot() {
+  _quoteSlotKeyCounter += 1;
+  return { key: `q${Date.now()}_${_quoteSlotKeyCounter}`, eventDate: "", endDate: "", startTime: "", endTime: "" };
 }
 
 // ─── Brand Design Tokens (Mates Inc.) ─────────────────────────────────────────
@@ -857,6 +864,61 @@ function defaultGreeting(form) {
   return `Hi ${name}, your booking${form.multiSession ? "s" : ""} at ${STUDIO_NAME} ${form.multiSession ? "are" : "is"} confirmed. Please review the details below and reach out if you have any questions.`;
 }
 
+// Builds the "here's what's actually open" email — organized by the candidate
+// date/time the client gave, listing only the rooms that came back available
+// AND that staff kept checked in the review step. Never touches pricing-hide
+// logic (the whole point of a quote is communicating rates) and never creates
+// any calendar event or booking record — purely informational.
+function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
+  const isHourly = quoteForm.bookingType === "hourly";
+  const greeting = escapeHtml(quoteForm.greeting || `Hi ${firstName(quoteForm.contactName) || "there"}, here's what we've got available for you — let us know which works best and we'll get you booked in.`).replace(/\n/g, "<br>");
+
+  const slotBlocks = quoteForm.slots.map(slot => {
+    const slotLabel = isHourly
+      ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
+      : formatDateRange(slot.eventDate, slot.endDate);
+    const rooms = (quoteResults?.[slot.key] || []).filter(r => r.available && quoteSelections[`${slot.key}__${r.room}`]);
+    const roomsHtml = rooms.length === 0
+      ? `<p style="margin:0;font-size:13px;color:#9ca3af;">No rooms available for this time.</p>`
+      : rooms.map(r => {
+          const loc = getRoomLocation(r.room);
+          const roomLabel = `${r.room}${loc.locationName ? `, ${loc.locationName}` : ""}`;
+          return `
+          <div style="border-top:1px solid #f3f4f6;padding:12px 0;">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;">
+              <span style="font-size:14px;font-weight:700;color:#111827;">${roomLabel}</span>
+              <span style="font-size:13px;color:#111827;font-weight:600;">${isHourly ? `$${r.rate}/hr` : `$${r.rate}/day`}</span>
+            </div>
+            ${loc.description ? `<p style="margin:6px 0 0;font-size:12.5px;color:#6b7280;line-height:1.5;">${escapeHtml(loc.description)}</p>` : ""}
+          </div>`;
+        }).join("");
+    return `
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:18px 22px;margin-bottom:16px;">
+        <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;">${slotLabel}</p>
+        ${roomsHtml}
+      </div>`;
+  }).join("");
+
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f4f4f2;font-family:Arial,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 16px;">
+    <div style="background:#121212;padding:28px 32px;border-radius:8px 8px 0 0;">
+      <h1 style="margin:0;color:#f2f2f0;font-size:22px;font-weight:700;letter-spacing:0.02em;">${STUDIO_NAME}</h1>
+      <p style="margin:6px 0 0;color:#9c9c9c;font-size:13px;">Room Availability${quoteForm.bandName ? ` for ${escapeHtml(quoteForm.bandName)}` : ""}</p>
+    </div>
+    <div style="background:#fff;padding:28px 32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+      <p style="font-size:15px;color:#374151;margin:0 0 24px;line-height:1.6;">${greeting}</p>
+      ${slotBlocks}
+      <p style="font-size:13px;color:#374151;margin:20px 0 0;line-height:1.6;">
+        Questions? Email <a href="mailto:${STUDIO_EMAIL}" style="color:#111827;font-weight:600;">${STUDIO_EMAIL}</a>.
+      </p>
+    </div>
+    <div style="padding:16px 32px;text-align:center;">
+      <p style="font-size:11px;color:#9ca3af;margin:0;">${STUDIO_NAME}</p>
+    </div>
+  </div>
+  </body></html>`;
+}
+
 function buildEmailHTML(form) {
   const location = getRoomLocation(form.room);
   const hrs = calcHours(form.startTime, form.endTime);
@@ -1497,6 +1559,74 @@ export default function App() {
   };
   const ROOMS = Object.keys(config.rooms);
 
+  // ─── Quote ────────────────────────────────────────────────────────────────
+  const [quoteForm, setQuoteForm] = useState({ bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "" });
+  const setQF = (key, val) => setQuoteForm(f => ({ ...f, [key]: val }));
+  const [quoteResults, setQuoteResults] = useState(null); // null = not checked yet; else { [slotKey]: [{room, rate, available}] }
+  const [quoteSelections, setQuoteSelections] = useState({}); // { "slotKey__RoomName": boolean }
+  const [checkingQuote, setCheckingQuote] = useState(false);
+  const [sendingQuote, setSendingQuote] = useState(false);
+  const [quoteSent, setQuoteSent] = useState(false);
+
+  const resetQuote = () => {
+    setQuoteForm({ bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "" });
+    setQuoteResults(null); setQuoteSelections({}); setQuoteSent(false);
+  };
+
+  const quoteSlotValid = (slot, bookingType) => bookingType === "hourly"
+    ? !!(slot.eventDate && slot.startTime && slot.endTime)
+    : !!(slot.eventDate && slot.endDate && calcDays(slot.eventDate, slot.endDate) > 0);
+  const quoteReadyToCheck = quoteForm.slots.length > 0 && quoteForm.slots.every(s => quoteSlotValid(s, quoteForm.bookingType));
+
+  const checkQuoteAvailability = async () => {
+    if (!token) { showToast("Connect Google first", "error"); return; }
+    setCheckingQuote(true); setQuoteSent(false);
+    try {
+      const eligibleRooms = ROOMS.filter(r => {
+        const rates = getRoomRates(r);
+        return quoteForm.bookingType === "hourly" ? rates.hourly != null : rates.daily != null;
+      });
+      const results = {};
+      for (const slot of quoteForm.slots) {
+        const roomChecks = await Promise.all(eligibleRooms.map(async room => {
+          const loc = getRoomLocation(room);
+          const rates = getRoomRates(room);
+          try {
+            const timeMinISO = quoteForm.bookingType === "hourly"
+              ? new Date(`${slot.eventDate}T${slot.startTime}:00`).toISOString()
+              : new Date(`${slot.eventDate}T00:00:00`).toISOString();
+            const timeMaxISO = quoteForm.bookingType === "hourly"
+              ? new Date(`${slot.eventDate}T${slot.endTime}:00`).toISOString()
+              : new Date(`${slot.endDate}T23:59:59`).toISOString();
+            const conflicts = await checkRoomConflicts(token, loc.calendarId, timeMinISO, timeMaxISO);
+            return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: conflicts.length === 0 };
+          } catch { return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: false }; }
+        }));
+        results[slot.key] = roomChecks;
+      }
+      setQuoteResults(results);
+      const sel = {};
+      Object.entries(results).forEach(([slotKey, rooms]) => rooms.forEach(r => { if (r.available) sel[`${slotKey}__${r.room}`] = true; }));
+      setQuoteSelections(sel);
+    } catch (e) { console.error("Quote check:", e); showToast("Couldn't check availability — check the console", "error"); }
+    setCheckingQuote(false);
+  };
+
+  const sendQuote = async () => {
+    if (!token) { showToast("Connect Google first", "error"); return; }
+    if (!quoteForm.contactEmail) { showToast("Add a contact email first", "error"); return; }
+    setSendingQuote(true);
+    try {
+      const subject = `${STUDIO_NAME} — Room Availability${quoteForm.bandName ? ` for ${quoteForm.bandName}` : ""}`;
+      const htmlBody = buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections);
+      await gmailSend(token, quoteForm.contactEmail, subject, htmlBody);
+      setQuoteSent(true);
+      showToast("Quote sent");
+    } catch (e) { console.error("Quote send:", e); showToast("Couldn't send the quote — check the console", "error"); }
+    setSendingQuote(false);
+  };
+
+
   const renameRoom = (oldName, rawNewName) => {
     const newName = rawNewName.trim();
     if (!newName || newName === oldName) return;
@@ -2090,7 +2220,7 @@ export default function App() {
             ↻ Reset
           </button>
           <nav style={{ display: "flex", gap: 6 }}>
-            {[["booking", "New Booking"], ["rundown", "Daily Rundown"], ["clients", "Clients"], ["calendar", "Calendar"], ["settings", "Settings"]].map(([k, l]) => (
+            {[["booking", "New Booking"], ["quote", "Quote"], ["rundown", "Daily Rundown"], ["clients", "Clients"], ["calendar", "Calendar"], ["settings", "Settings"]].map(([k, l]) => (
               <button key={k} onClick={() => setTab(k)}
                 style={{ padding: "8px 16px", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, transition: "all 0.15s", background: tab === k ? C.accent : "transparent", color: tab === k ? C.accentText : C.textMuted, border: tab === k ? `1px solid ${C.accent}` : `1px solid ${C.border}`, fontWeight: "500" }}>
                 {l}
@@ -2897,6 +3027,133 @@ export default function App() {
           </div>
         )}
 
+        {/* ══ QUOTE TAB ══ */}
+        {tab === "quote" && (
+          <div style={{ background: C.surface, borderRadius: 4, border: `1px solid ${C.border}`, padding: "32px 36px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+              <Sect>Quote</Sect>
+              <button onClick={resetQuote} style={{ padding: "7px 14px", fontSize: 11, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.textMuted, border: `1px solid ${C.border}`, fontWeight: "500" }}>↻ New Quote</button>
+            </div>
+            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 24 }}>Check one or more candidate dates against every room at once, and send the client a menu of what's actually available — no booking or calendar hold gets created.</p>
+
+            {!token ? (
+              <div style={{ color: C.textMuted, fontSize: 14, padding: "20px 0" }}>Connect Google above to check availability.</div>
+            ) : (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
+                  <div>
+                    <label style={S.label}>Band / Client</label>
+                    <input value={quoteForm.bandName} onChange={e => setQF("bandName", e.target.value)} placeholder="Optional" style={S.input} />
+                  </div>
+                  <div>
+                    <label style={S.label}>Contact Name</label>
+                    <input value={quoteForm.contactName} onChange={e => setQF("contactName", e.target.value)} style={S.input} />
+                  </div>
+                  <div>
+                    <label style={S.label}>Contact Email *</label>
+                    <input type="email" value={quoteForm.contactEmail} onChange={e => setQF("contactEmail", e.target.value)} style={S.input} />
+                  </div>
+                </div>
+
+                <label style={S.label}>Booking Type *</label>
+                <div style={{ background: C.surface3, borderRadius: 3, padding: 3, display: "flex", border: `1px solid ${C.border}`, width: 260, marginBottom: 22 }}>
+                  {[["hourly", "⏱ Hourly"], ["daily", "🔒 Lock Out"]].map(([val, lbl]) => (
+                    <button key={val} onClick={() => { setQF("bookingType", val); setQuoteResults(null); }}
+                      style={{ flex: 1, padding: "9px 0", fontSize: 13, fontFamily: "inherit", cursor: "pointer", background: quoteForm.bookingType === val ? C.accent : "transparent", color: quoteForm.bookingType === val ? C.accentText : C.textMuted, border: "none", fontWeight: quoteForm.bookingType === val ? "600" : "400", borderRadius: 2 }}>
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+
+                <Sect>Candidate Dates ({quoteForm.slots.length})</Sect>
+                {quoteForm.slots.map((slot, i) => {
+                  const updateSlot = patch => { setQF("slots", quoteForm.slots.map(x => x.key === slot.key ? { ...x, ...patch } : x)); setQuoteResults(null); };
+                  return (
+                    <div key={slot.key} style={{ background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, padding: "14px 16px", marginBottom: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <span style={{ fontSize: 11, fontFamily: FONT.mono, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Option {i + 1}</span>
+                        {quoteForm.slots.length > 1 && (
+                          <button onClick={() => { setQF("slots", quoteForm.slots.filter(x => x.key !== slot.key)); setQuoteResults(null); }} style={{ background: "transparent", border: "none", color: C.danger, cursor: "pointer", fontSize: 11, fontFamily: FONT.mono, textTransform: "uppercase" }}>Remove</button>
+                        )}
+                      </div>
+                      {quoteForm.bookingType === "hourly" ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", gap: 10 }}>
+                          <div><label style={S.label}>Date *</label><input type="date" value={slot.eventDate} onChange={e => updateSlot({ eventDate: e.target.value })} style={S.input} /></div>
+                          <div><label style={S.label}>Start *</label><select value={slot.startTime} onChange={e => updateSlot({ startTime: e.target.value, endTime: addHoursToTime(e.target.value, 3) })} style={{ ...SEL, padding: "10px 30px 10px 11px" }}><option value="">Select…</option>{START_TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+                          <div><label style={S.label}>End *</label><select value={slot.endTime} onChange={e => updateSlot({ endTime: e.target.value })} style={{ ...SEL, padding: "10px 30px 10px 11px" }}><option value="">Select…</option>{END_TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+                        </div>
+                      ) : (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                          <div><label style={S.label}>Start Date *</label><input type="date" value={slot.eventDate} onChange={e => updateSlot({ eventDate: e.target.value })} style={S.input} /></div>
+                          <div><label style={S.label}>End Date *</label><input type="date" value={slot.endDate} onChange={e => updateSlot({ endDate: e.target.value })} style={S.input} /></div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <button onClick={() => setQF("slots", [...quoteForm.slots, newQuoteSlot()])}
+                  style={{ width: "100%", padding: "11px", background: "transparent", border: `1px dashed ${C.border}`, borderRadius: 3, color: C.textMuted, cursor: "pointer", fontFamily: FONT.mono, fontSize: 12, letterSpacing: "0.03em", textTransform: "uppercase", marginBottom: 22 }}>
+                  + Add Another Date Option
+                </button>
+
+                <button onClick={checkQuoteAvailability} disabled={!quoteReadyToCheck || checkingQuote}
+                  style={{ padding: "12px 28px", background: C.accent, color: C.accentText, border: "none", borderRadius: 3, cursor: "pointer", fontFamily: FONT.mono, fontSize: 12, letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: "600", opacity: (!quoteReadyToCheck || checkingQuote) ? 0.5 : 1, marginBottom: 28 }}>
+                  {checkingQuote ? "Checking…" : "Check Availability"}
+                </button>
+
+                {quoteResults && (
+                  <>
+                    <Sect>Available Rooms — Review Before Sending</Sect>
+                    {quoteForm.slots.map(slot => {
+                      const rooms = quoteResults[slot.key] || [];
+                      const available = rooms.filter(r => r.available);
+                      const slotLabel = quoteForm.bookingType === "hourly"
+                        ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
+                        : formatDateRange(slot.eventDate, slot.endDate);
+                      return (
+                        <div key={slot.key} style={{ marginBottom: 20 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: "600", color: C.text, marginBottom: 8 }}>{slotLabel}</div>
+                          {available.length === 0 ? (
+                            <div style={{ fontSize: 13, color: C.textFaint, padding: "8px 0" }}>Nothing available for this option.</div>
+                          ) : available.map(r => {
+                            const loc = getRoomLocation(r.room);
+                            const selKey = `${slot.key}__${r.room}`;
+                            return (
+                              <label key={r.room} style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer", userSelect: "none", padding: "8px 0" }}
+                                onClick={() => setQuoteSelections(sel => ({ ...sel, [selKey]: !sel[selKey] }))}>
+                                <div style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteSelections[selKey] ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
+                                  {quoteSelections[selKey] && <span style={{ color: C.accentText, fontSize: 10, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                                </div>
+                                <div>
+                                  <span style={{ fontSize: 13.5, color: C.text }}>{r.room}{loc.locationName ? `, ${loc.locationName}` : ""}</span>
+                                  <span style={{ fontSize: 13, color: C.textMuted, marginLeft: 8 }}>{quoteForm.bookingType === "hourly" ? `$${r.rate}/hr` : `$${r.rate}/day`}</span>
+                                  {loc.description && <div style={{ fontSize: 12, color: C.textFaint, marginTop: 2 }}>{loc.description}</div>}
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+
+                    <Sect>Email Message</Sect>
+                    <div style={{ marginBottom: 20 }}>
+                      <textarea value={quoteForm.greeting} onChange={e => setQF("greeting", e.target.value)} rows={2}
+                        placeholder={`Hi ${firstName(quoteForm.contactName) || "there"}, here's what we've got available for you — let us know which works best and we'll get you booked in.`}
+                        style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                    </div>
+
+                    <button onClick={sendQuote} disabled={sendingQuote || !quoteForm.contactEmail}
+                      style={{ padding: "12px 28px", background: C.accent, color: C.accentText, border: "none", borderRadius: 3, cursor: "pointer", fontFamily: FONT.mono, fontSize: 12, letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: "600", opacity: (sendingQuote || !quoteForm.contactEmail) ? 0.5 : 1 }}>
+                      {sendingQuote ? "Sending…" : quoteSent ? "✓ Sent — Send Again" : "Send Quote"}
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* ══ DAILY RUNDOWN TAB ══ */}
         {tab === "rundown" && (
           <div style={{ background: C.surface, borderRadius: 4, border: `1px solid ${C.border}`, padding: "32px 36px" }}>
@@ -3117,6 +3374,20 @@ export default function App() {
             <div style={{ display: "flex", gap: 8, marginBottom: 34 }}>
               <button onClick={addRoom} style={{ padding: "8px 16px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: C.accent, color: C.accentText, border: "none", fontWeight: "500" }}>+ Add Room</button>
               <button onClick={resetRoomsToDefault} style={{ padding: "8px 16px", fontSize: 11.5, letterSpacing: "0.04em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: "transparent", color: C.textMuted, border: `1px solid ${C.border}`, fontWeight: "500" }}>Reset to Defaults</button>
+            </div>
+
+            {/* Room Descriptions (for Quotes) */}
+            <Sect>Room Descriptions</Sect>
+            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 14 }}>Size, PA specs, backline, whatever's worth telling a client comparing rooms — shown automatically in quote emails.</p>
+            <div style={{ marginBottom: 34 }}>
+              {ROOMS.map(room => (
+                <div key={room} style={{ marginBottom: 12 }}>
+                  <label style={S.label}>{room}</label>
+                  <textarea defaultValue={config.rooms[room]?.description || ""} onBlur={e => updateRoomField(room, "description", e.target.value)} rows={2}
+                    placeholder="e.g. ~400 sq ft, full PA with 2 monitor mixes, house drum kit"
+                    style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "9px 11px", fontSize: 12.5, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                </div>
+              ))}
             </div>
 
             {/* Gear */}
