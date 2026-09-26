@@ -1199,6 +1199,13 @@ function backlineNoteFor(isAllDay, rentalsText) {
   if (isAllDay) return rentalsText ? `Needs Backline — ${rentalsText}` : "No Backline Required";
   return rentalsText ? `Needs Backline — ${rentalsText}` : "Needs Backline";
 }
+// Same backline/rentals logic as backlineNoteFor above, just phrased to fit
+// "Reset with ___" / "Set Up with ___" instead of a standalone sentence —
+// used for the "Next booking" line when the prep day itself is empty.
+function resetBacklinePhrase(isAllDay, rentalsText) {
+  if (isAllDay) return rentalsText ? `with backline — ${rentalsText}` : "with no backline";
+  return rentalsText ? `with backline — ${rentalsText}` : "with backline";
+}
 // For a Lock Out event overlapping the rundown date, returns which day of
 // the lockout that date falls on (e.g. "Day 2/2", "Day 3/5"). ev.start/end
 // are "YYYY-MM-DD" strings for all-day events — end is exclusive.
@@ -1264,7 +1271,14 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvent
       const upcoming = futureEvents.filter(e => e.room === room).sort((a, b) => parseEventBoundary(a.start, a.allDay) - parseEventBoundary(b.start, b.allDay))[0] || null;
       if (upcoming) {
         const daysUntil = calcDays(prepDateKey, isoDateKey(parseEventBoundary(upcoming.start, upcoming.allDay))) - 1;
-        nextBooking = { band: bandNameFromEventTitle(upcoming.title), typeLabel: upcoming.allDay ? "Lock Out" : "Hourly", daysUntil };
+        const rentals = parseRentalsFromDescription(upcoming.description);
+        nextBooking = {
+          band: bandNameFromEventTitle(upcoming.title),
+          typeLabel: upcoming.allDay ? "Lock Out" : "Hourly",
+          daysUntil,
+          verb: todays.length > 0 ? "Reset" : "Set Up", // same distinction as today's prep line — nothing to reset from an already-empty room
+          backlinePhrase: resetBacklinePhrase(upcoming.allDay, rentals),
+        };
       }
     }
     return { room, address: getRoomLocation(room).address, todays, prepEv, continuing, prepLine, nextBooking, flag: prepEv ? parseEventFlag(prepEv.title) : null };
@@ -1455,7 +1469,7 @@ export default function App() {
             }).join("")
           : `<div style="font-size:13px;color:#9ca3af;">Nothing booked today.</div>`;
         const nextLineHtml = !r.prepLine
-          ? `<div style="font-size:13px;color:#6b7280;margin-top:6px;">${r.nextBooking ? `Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}` : "Nothing else on the books."}</div>`
+          ? `<div style="font-size:13px;color:#b45309;font-weight:600;margin-top:6px;">${r.nextBooking ? `${r.nextBooking.verb} ${r.nextBooking.backlinePhrase}. Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}` : "Nothing else on the books."}</div>`
           : "";
         return `
           <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:12px 14px;margin-bottom:8px;">
@@ -3475,9 +3489,9 @@ export default function App() {
                             </div>
                           )}
                           {!r.prepLine && (
-                            <div style={{ fontSize: 13, color: C.textMuted, marginTop: 6 }}>
+                            <div style={{ fontSize: 13, color: r.nextBooking ? C.warning : C.textMuted, marginTop: 6, fontWeight: r.nextBooking ? "500" : "400" }}>
                               {r.nextBooking
-                                ? `Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}`
+                                ? `→ ${r.nextBooking.verb} ${r.nextBooking.backlinePhrase}. Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}`
                                 : "Nothing else on the books."}
                             </div>
                           )}
