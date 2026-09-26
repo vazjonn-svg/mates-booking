@@ -1454,17 +1454,21 @@ export default function App() {
               return `<div style="font-size:13px;color:#111827;">${stripEventFlag(ev.title)} — <span style="color:#6b7280;">${timeStr}</span></div>`;
             }).join("")
           : `<div style="font-size:13px;color:#9ca3af;">Nothing booked today.</div>`;
+        const nextLineHtml = !r.prepLine
+          ? `<div style="font-size:13px;color:#6b7280;margin-top:6px;">${r.nextBooking ? `Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}` : "Nothing else on the books."}</div>`
+          : "";
         return `
           <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:12px 14px;margin-bottom:8px;">
             <div style="font-size:13.5px;font-weight:700;color:#111827;margin-bottom:6px;">${r.room}${r.flag ? ` <span style="color:#b45309;">${r.flag}</span>` : ""}</div>
             ${todayLines}
             ${r.prepLine ? `<div style="font-size:13px;color:${r.continuing ? "#2563eb" : "#b45309"};font-weight:600;margin-top:6px;">→ ${r.prepLine}</div>` : ""}
+            ${nextLineHtml}
             ${stagePlot ? `<a href="${stagePlot.fileUrl}" style="display:inline-block;margin-top:4px;font-size:12px;color:#2563eb;text-decoration:none;">📎 View Stage Plot</a>` : ""}
           </div>`;
       };
-      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownDate);
+      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownDate, futureEvents);
       const groupsHtml = roomGroups.length === 0 ? `<p style="font-size:14px;color:#6b7280;">Nothing on the calendar for either day.</p>` : roomGroups.map(g => `
-        <p style="margin:18px 0 6px;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;">📍 ${g.address}</p>
+        <p style="margin:18px 0 6px;font-size:13px;font-weight:700;color:#111827;text-transform:uppercase;letter-spacing:0.06em;">${g.locationName}</p>
         ${g.rooms.map(roomBoxHtml).join("")}`).join("");
 
       const htmlBody = `
