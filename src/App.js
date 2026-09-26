@@ -1703,6 +1703,18 @@ export default function App() {
         await gmailSend(token, quoteForm.contactEmail, subject, htmlBody);
       }
       setQuoteSent(true);
+      // Save/update this client so they're available to autofill on the New
+      // Booking tab too. Built up field-by-field rather than all at once —
+      // band/name are only included if actually filled in, and lastBooked/
+      // lastRoom are left out entirely (nothing was actually booked) — so a
+      // quote with a blank field never overwrites an existing client's real
+      // saved info with a blank one during the merge.
+      const quoteClientRecord = { email: quoteForm.contactEmail };
+      if (quoteForm.bandName) quoteClientRecord.band = quoteForm.bandName;
+      if (quoteForm.contactName) quoteClientRecord.name = quoteForm.contactName;
+      persistClient(quoteClientRecord);
+      setClients(loadClients());
+      syncContactToSheet(quoteClientRecord); // best-effort — same shared contacts list your boss sees too
       showToast("Quote sent");
     } catch (e) { console.error("Quote send:", e); showToast("Couldn't send the quote — check the console", "error"); }
     setSendingQuote(false);
