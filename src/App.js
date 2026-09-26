@@ -1227,19 +1227,31 @@ function groupRundownByLocation(events, config) {
     })
     .filter(g => g.events.length > 0);
 }
+// Pulls just the band name back out of a calendar event title, which is
+// always saved as "[flag]BandName – Room" — strips the flag prefix, then
+// drops everything from the " – Room" suffix onward.
+function bandNameFromEventTitle(title) {
+  return stripEventFlag(title).split(" – ")[0].trim();
+}
 // One box per room instead of two separate Today/Prep lists — shows today's
 // booking(s) in that room alongside the instruction for what the room needs
 // before the NEXT booking day, with the reasoning built into the sentence
 // ("Reset Room — No Backline Required (Lock Out loading in next)"). A Lock
 // Out that's still ongoing from today into the prep date is recognized as
-// the same booking continuing, not something to reset for.
-function buildRoomRundown(todayEvents, prepEvents, config, prepDate) {
+// the same booking continuing, not something to reset for. When the prep
+// date itself is empty for a room, there's nothing to reset FOR — instead of
+// no instruction at all, looks ahead (via futureEvents, already fetched for
+// every room in one batched call) and surfaces whatever's booked next on
+// that room's calendar, so staff know if something's coming soon or not.
+function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvents = []) {
   const rooms = new Set([...todayEvents, ...prepEvents].map(e => e.room).filter(Boolean));
+  const prepDateKey = isoDateKey(prepDate);
   const entries = [...rooms].map(room => {
     const todays = todayEvents.filter(e => e.room === room).sort((a, b) => new Date(a.start) - new Date(b.start));
     const prepEv = prepEvents.find(e => e.room === room) || null;
     const continuing = !!(prepEv && todays.some(t => t.id === prepEv.id));
     let prepLine = null;
+    let nextBooking = null;
     if (prepEv && continuing) {
       prepLine = "Lock Out continues";
     } else if (prepEv) {
@@ -1248,8 +1260,14 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate) {
       const verb = todays.length > 0 ? "Reset Room" : "Set Up Room";
       const typeLabel = prepEv.allDay ? "Lock Out" : "Hourly booking";
       prepLine = `${verb} — ${backline} (${typeLabel} loading in next)`;
+    } else {
+      const upcoming = futureEvents.filter(e => e.room === room).sort((a, b) => parseEventBoundary(a.start, a.allDay) - parseEventBoundary(b.start, b.allDay))[0] || null;
+      if (upcoming) {
+        const daysUntil = calcDays(prepDateKey, isoDateKey(parseEventBoundary(upcoming.start, upcoming.allDay))) - 1;
+        nextBooking = { band: bandNameFromEventTitle(upcoming.title), typeLabel: upcoming.allDay ? "Lock Out" : "Hourly", daysUntil };
+      }
     }
-    return { room, address: getRoomLocation(room).address, todays, prepEv, continuing, prepLine, flag: prepEv ? parseEventFlag(prepEv.title) : null };
+    return { room, address: getRoomLocation(room).address, todays, prepEv, continuing, prepLine, nextBooking, flag: prepEv ? parseEventFlag(prepEv.title) : null };
   });
   const rank = e => !e.prepEv ? 2 : (e.prepEv.allDay ? 0 : 1);
   entries.sort((a, b) => {
@@ -1265,7 +1283,11 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate) {
     if (addr && !seenAddr.has(addr)) { seenAddr.add(addr); addressOrder.push(addr); }
   });
   return addressOrder
-    .map(address => ({ address, rooms: entries.filter(e => e.address === address) }))
+    .map(address => {
+      const roomAtAddr = Object.keys(config.rooms).find(r => config.rooms[r].address === address);
+      const locationName = (roomAtAddr && config.rooms[roomAtAddr].locationName) || address;
+      return { address, locationName, rooms: entries.filter(e => e.address === address) };
+    })
     .filter(g => g.rooms.length > 0);
 }
 
@@ -1368,6 +1390,7 @@ export default function App() {
   const [checkedCrew, setCheckedCrew] = useState(() => new Set());
   const [sendingRundown, setSendingRundown] = useState(false);
   const [rundownSent, setRundownSent] = useState(false);
+  const [futureEvents, setFutureEvents] = useState([]); // everything booked, across all rooms, in the ~4 months after the prep date — used to surface "next booking" when a room's prep day is empty
 
   useEffect(() => {
     if (tab !== "rundown" || !token) return;
@@ -1379,6 +1402,19 @@ export default function App() {
       .then(evs => { if (!cancelled) setRundownEvents(evs.sort((a, b) => (a.room || "").localeCompare(b.room || ""))); })
       .catch(() => { if (!cancelled) showToast("Couldn't load bookings for that day", "error"); })
       .finally(() => { if (!cancelled) setRundownLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, token, rundownDate.getTime()]);
+
+  useEffect(() => {
+    if (tab !== "rundown" || !token) return;
+    let cancelled = false;
+    const dayEnd = addDays(new Date(rundownDate), 1); dayEnd.setHours(0, 0, 0, 0);
+    const lookaheadEnd = addDays(dayEnd, 120); // ~4 months out — generous, but bounded so "next booking" never searches forever
+    listCalendarEventsInRange(token, dayEnd.toISOString(), lookaheadEnd.toISOString())
+      .then(evs => { if (!cancelled) setFutureEvents(evs); })
+      .catch(() => { if (!cancelled) setFutureEvents([]); }) // silent — this only enriches an empty prep line, never worth an error toast
+      .finally(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, token, rundownDate.getTime()]);
@@ -3410,9 +3446,9 @@ export default function App() {
               <div style={{ color: C.textFaint, fontSize: 14, padding: "20px 0" }}>Nothing on the calendar for either day.</div>
             ) : (
               <div style={{ marginBottom: 26 }}>
-                {buildRoomRundown(todayEvents, rundownEvents, config, rundownDate).map((group, gi) => (
+                {buildRoomRundown(todayEvents, rundownEvents, config, rundownDate, futureEvents).map((group, gi) => (
                   <div key={gi} style={{ marginBottom: 18 }}>
-                    <div style={{ fontSize: 11, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.05em", color: C.textMuted, marginBottom: 8 }}>📍 {group.address}</div>
+                    <div style={{ fontSize: 15, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.05em", color: C.text, fontWeight: "600", marginBottom: 8 }}>{group.locationName}</div>
                     {group.rooms.map((r, i) => {
                       const stagePlot = r.prepEv ? (r.prepEv.attachments || []).find(a => a.title?.startsWith("Stage Plot")) : null;
                       return (
@@ -3432,6 +3468,13 @@ export default function App() {
                           {r.prepLine && (
                             <div style={{ fontSize: 13, color: r.continuing ? C.info : C.warning, marginTop: 6, fontWeight: "500" }}>
                               → {r.prepLine}
+                            </div>
+                          )}
+                          {!r.prepLine && (
+                            <div style={{ fontSize: 13, color: C.textMuted, marginTop: 6 }}>
+                              {r.nextBooking
+                                ? `Next: ${r.nextBooking.band} — ${r.nextBooking.typeLabel}, booked in ${r.nextBooking.daysUntil} day${r.nextBooking.daysUntil === 1 ? "" : "s"}`
+                                : "Nothing else on the books."}
                             </div>
                           )}
                           {stagePlot && (
