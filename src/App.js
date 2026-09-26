@@ -939,6 +939,9 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
       <p style="font-size:15px;color:#374151;margin:0 0 24px;line-height:1.6;">${greeting}</p>
       ${slotBlocks}
       <p style="font-size:13px;color:#374151;margin:20px 0 0;line-height:1.6;">
+        View pictures at <a href="https://www.matesinc.com" style="color:#111827;font-weight:600;">www.matesinc.com</a>.
+      </p>
+      <p style="font-size:13px;color:#374151;margin:6px 0 0;line-height:1.6;">
         Questions? Email <a href="mailto:${STUDIO_EMAIL}" style="color:#111827;font-weight:600;">${STUDIO_EMAIL}</a>.
       </p>
     </div>
@@ -3300,6 +3303,16 @@ export default function App() {
                       <textarea value={quoteForm.greeting} onChange={e => setQF("greeting", e.target.value)} rows={2}
                         placeholder={`Hi ${firstName(quoteForm.contactName) || "there"}, here's what we've got available for you — let us know which works best and we'll get you booked in.`}
                         style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                    </div>
+
+                    {/* Email preview — recomputed live from current selections/greeting/rentals, so it's never stale */}
+                    <div style={{ border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden", marginBottom: 20 }}>
+                      <div style={{ background: C.surface3, padding: "10px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.textMuted, fontWeight: "600", letterSpacing: "0.06em", textTransform: "uppercase", fontFamily: FONT.mono }}>
+                        Email Preview — sending to {quoteForm.contactEmail || "…"}
+                      </div>
+                      <div style={{ padding: "20px", background: "#e9e9e6" }}>
+                        <div dangerouslySetInnerHTML={{ __html: buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) }} />
+                      </div>
                     </div>
 
                     {/* Reply within an existing email thread */}
