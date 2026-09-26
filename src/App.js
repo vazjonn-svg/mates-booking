@@ -910,10 +910,10 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
           const roomLabel = `${r.room}${loc.locationName ? `, ${loc.locationName}` : ""}`;
           return `
           <div style="border-top:1px solid #f3f4f6;padding:12px 0;">
-            <div style="display:flex;justify-content:space-between;align-items:baseline;">
-              <span style="font-size:14px;font-weight:700;color:#111827;">${roomLabel}</span>
-              <span style="font-size:13px;color:#111827;font-weight:600;">${isHourly ? `$${r.rate}/hr` : `$${r.rate}/day`}</span>
-            </div>
+            <table style="width:100%;border-collapse:collapse;"><tr>
+              <td style="font-size:14px;font-weight:700;color:#111827;vertical-align:baseline;">${roomLabel}</td>
+              <td style="font-size:13px;color:#111827;font-weight:600;text-align:right;white-space:nowrap;vertical-align:baseline;padding-left:12px;">${isHourly ? `$${r.rate}/hr` : `$${r.rate}/day`}</td>
+            </tr></table>
             ${loc.address ? `<p style="margin:4px 0 0;font-size:12px;">${mapsLinkHtml(loc.address, loc.address, "color:#2563eb;text-decoration:none;")}</p>` : ""}
             ${loc.description ? `<p style="margin:8px 0 0;font-size:12.5px;color:#6b7280;line-height:1.6;">${escapeHtml(loc.description).replace(/\n/g, "<br>")}</p>` : ""}
           </div>`;
@@ -923,7 +923,7 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
         <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;">${slotLabel}</p>
         ${roomsHtml}
         ${rentalsText ? `
-        <div style="border-top:1px solid #e5e7eb;margin-top:10px;padding-top:10px;display:flex;justify-content:space-between;">
+        <div style="border-top:1px solid #e5e7eb;margin-top:10px;padding-top:10px;">
           <span style="font-size:12.5px;color:#6b7280;">Rentals: ${rentalsText}</span>
         </div>` : ""}
       </div>`;
