@@ -371,6 +371,30 @@ function rentalSummaryText(form, { includePrices = true } = {}) {
       return days > 1 ? `${item} ×${q} × ${days} days ($${sub.toFixed(2)})` : `${item} ×${q} ($${sub.toFixed(2)})`;
     }).join(", ");
 }
+// Same rental-billing idea as a real booking, but scoped to ONE quote slot —
+// gear is picked once for the whole quote (a client's rental needs don't
+// change based on which date wins), priced per slot since a Lock Out slot's
+// day count varies by slot while an Hourly slot is always 1 unit.
+function calcQuoteRentalUnits(quoteForm, slot) {
+  return quoteForm.bookingType === "daily" ? Math.max(1, calcDays(slot.eventDate, slot.endDate)) : 1;
+}
+function calcQuoteRentalTotal(quoteForm, slot) {
+  const units = calcQuoteRentalUnits(quoteForm, slot);
+  return Object.entries(quoteForm.rentals || {}).reduce((sum, [item, qty]) => {
+    if (qty <= 0) return sum;
+    const rate = parseFloat((quoteForm.rentalRates || {})[item]) || 0;
+    return sum + rate * qty * units;
+  }, 0);
+}
+function quoteRentalSummaryText(quoteForm, slot) {
+  const units = calcQuoteRentalUnits(quoteForm, slot);
+  return Object.entries(quoteForm.rentals || {}).filter(([, q]) => q > 0)
+    .map(([item, q]) => {
+      const rate = parseFloat((quoteForm.rentalRates || {})[item]) || 0;
+      const sub = rate * q * units;
+      return units > 1 ? `${item} ×${q} × ${units} days ($${sub.toFixed(2)})` : `${item} ×${q} ($${sub.toFixed(2)})`;
+    }).join(", ");
+}
 
 // ─── localStorage ─────────────────────────────────────────────────────────────
 const CLIENTS_KEY = "mates_clients_v1";
@@ -878,6 +902,7 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
       ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
       : formatDateRange(slot.eventDate, slot.endDate);
     const rooms = (quoteResults?.[slot.key] || []).filter(r => r.available && quoteSelections[`${slot.key}__${r.room}`]);
+    const rentalsText = quoteRentalSummaryText(quoteForm, slot);
     const roomsHtml = rooms.length === 0
       ? `<p style="margin:0;font-size:13px;color:#9ca3af;">No rooms available for this time.</p>`
       : rooms.map(r => {
@@ -897,6 +922,10 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
       <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:18px 22px;margin-bottom:16px;">
         <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;">${slotLabel}</p>
         ${roomsHtml}
+        ${rentalsText ? `
+        <div style="border-top:1px solid #e5e7eb;margin-top:10px;padding-top:10px;display:flex;justify-content:space-between;">
+          <span style="font-size:12.5px;color:#6b7280;">Rentals: ${rentalsText}</span>
+        </div>` : ""}
       </div>`;
   }).join("");
 
@@ -1561,17 +1590,62 @@ export default function App() {
   const ROOMS = Object.keys(config.rooms);
 
   // ─── Quote ────────────────────────────────────────────────────────────────
-  const [quoteForm, setQuoteForm] = useState({ bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "" });
+  const emptyQuoteForm = () => ({
+    bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "",
+    rentals: {}, rentalRates: Object.fromEntries(config.gear.map(g => [g.name, g.rate])),
+    replyThreadId: null, replyMessageId: null, replyCc: "", // set when staff pick a thread to reply into
+  });
+  const [quoteForm, setQuoteForm] = useState(emptyQuoteForm);
   const setQF = (key, val) => setQuoteForm(f => ({ ...f, [key]: val }));
   const [quoteResults, setQuoteResults] = useState(null); // null = not checked yet; else { [slotKey]: [{room, rate, available}] }
   const [quoteSelections, setQuoteSelections] = useState({}); // { "slotKey__RoomName": boolean }
   const [checkingQuote, setCheckingQuote] = useState(false);
   const [sendingQuote, setSendingQuote] = useState(false);
   const [quoteSent, setQuoteSent] = useState(false);
+  const [quoteGearSearch, setQuoteGearSearch] = useState("");
+  const [quoteHasRentals, setQuoteHasRentals] = useState(false);
+  const [quoteReplyMode, setQuoteReplyMode] = useState(false); // "reply in existing thread" toggled on before sending
+  const [quoteThreadResults, setQuoteThreadResults] = useState(null); // null = not searched yet, [] = searched, no matches
+  const [searchingQuoteThreads, setSearchingQuoteThreads] = useState(false);
 
   const resetQuote = () => {
-    setQuoteForm({ bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "" });
-    setQuoteResults(null); setQuoteSelections({}); setQuoteSent(false);
+    setQuoteForm(emptyQuoteForm());
+    setQuoteResults(null); setQuoteSelections({}); setQuoteSent(false); setQuoteHasRentals(false); setQuoteGearSearch("");
+    setQuoteReplyMode(false); setQuoteThreadResults(null);
+  };
+  const searchForQuoteThreads = async () => {
+    if (!quoteForm.contactEmail) return;
+    setSearchingQuoteThreads(true);
+    try { setQuoteThreadResults(await gmailSearchThreads(token, quoteForm.contactEmail)); }
+    catch { showToast("Couldn't search Gmail", "error"); setQuoteThreadResults([]); }
+    setSearchingQuoteThreads(false);
+  };
+  const pickQuoteThread = t => {
+    setQuoteForm(f => ({ ...f, replyThreadId: t.id, replyMessageId: t.messageId, replyCc: (t.cc || []).join(", ") }));
+  };
+
+  // Client autocomplete — same saved-clients list the booking form uses, kept
+  // fully separate (its own search/dropdown state) so it never interferes
+  // with whatever's in progress on the New Booking tab.
+  const [quoteClientSearch, setQuoteClientSearch] = useState("");
+  const [showQuoteDrop, setShowQuoteDrop] = useState(false);
+  const quoteDropRef = useRef(null);
+  useEffect(() => {
+    const h = e => { if (quoteDropRef.current && !quoteDropRef.current.contains(e.target)) setShowQuoteDrop(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+  const filteredQuoteClients = clients.filter(c =>
+    quoteClientSearch.length > 0 && (
+      c.band?.toLowerCase().includes(quoteClientSearch.toLowerCase()) ||
+      c.name?.toLowerCase().includes(quoteClientSearch.toLowerCase()) ||
+      c.email?.toLowerCase().includes(quoteClientSearch.toLowerCase())
+    )
+  );
+  const selectQuoteClient = c => {
+    setQuoteForm(f => ({ ...f, bandName: c.band, contactName: c.name, contactEmail: c.email }));
+    setQuoteClientSearch(c.band || c.name);
+    setShowQuoteDrop(false);
   };
 
   const quoteSlotValid = (slot, bookingType) => bookingType === "hourly"
@@ -1620,7 +1694,11 @@ export default function App() {
     try {
       const subject = `${STUDIO_NAME} — Room Availability${quoteForm.bandName ? ` for ${quoteForm.bandName}` : ""}`;
       const htmlBody = buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections);
-      await gmailSend(token, quoteForm.contactEmail, subject, htmlBody);
+      if (quoteForm.replyThreadId) {
+        await gmailSendInThread(token, quoteForm.contactEmail, subject, htmlBody, quoteForm.replyThreadId, quoteForm.replyMessageId, quoteForm.replyCc || undefined);
+      } else {
+        await gmailSend(token, quoteForm.contactEmail, subject, htmlBody);
+      }
       setQuoteSent(true);
       showToast("Quote sent");
     } catch (e) { console.error("Quote send:", e); showToast("Couldn't send the quote — check the console", "error"); }
@@ -3041,6 +3119,28 @@ export default function App() {
               <div style={{ color: C.textMuted, fontSize: 14, padding: "20px 0" }}>Connect Google above to check availability.</div>
             ) : (
               <>
+                <div ref={quoteDropRef} style={{ position: "relative", marginBottom: 22 }}>
+                  <label style={S.label}>Search saved clients or type new name</label>
+                  <input value={quoteClientSearch}
+                    onChange={e => { setQuoteClientSearch(e.target.value); setShowQuoteDrop(true); setQF("bandName", e.target.value); }}
+                    onFocus={() => setShowQuoteDrop(true)}
+                    placeholder="Band name, artist, or email…"
+                    style={S.input} />
+                  {showQuoteDrop && filteredQuoteClients.length > 0 && (
+                    <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.surface2, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 4px 4px", zIndex: 200, maxHeight: 210, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.4)" }}>
+                      {filteredQuoteClients.map((c, i) => (
+                        <div key={i} onClick={() => selectQuoteClient(c)}
+                          style={{ padding: "10px 14px", cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}
+                          onMouseEnter={e => e.currentTarget.style.background = C.surface3}
+                          onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                          <div style={{ fontSize: 13.5, fontWeight: "500", color: C.text }}>{c.band}</div>
+                          <div style={{ fontSize: 11, color: C.textMuted }}>{c.name} · {c.email}{c.lastBooked ? ` · Last booked: ${fmtDate(c.lastBooked)}${c.lastRoom ? ` (${c.lastRoom})` : ""}` : ""}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
                   <div>
                     <label style={S.label}>Band / Client</label>
@@ -3097,6 +3197,59 @@ export default function App() {
                   + Add Another Date Option
                 </button>
 
+                <Sect>Equipment Rentals</Sect>
+                <div style={{ marginBottom: 22 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: 14, userSelect: "none" }} onClick={() => setQuoteHasRentals(v => !v)}>
+                    <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteHasRentals ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {quoteHasRentals && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                    </div>
+                    <span style={{ fontSize: 13.5, color: C.text }}>Mention rental gear pricing in this quote</span>
+                  </label>
+
+                  {quoteHasRentals && (
+                    <div style={{ background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, padding: "16px 18px" }}>
+                      {quoteForm.bookingType === "daily" && (
+                        <div style={{ marginBottom: 12, padding: "7px 12px", background: C.infoBg, border: `1px solid ${C.infoBorder}`, borderRadius: 3, fontSize: 12, color: C.info }}>
+                          📅 Rates shown per day — final cost depends on which date option is picked
+                        </div>
+                      )}
+                      <input type="text" value={quoteGearSearch} onChange={e => setQuoteGearSearch(e.target.value)}
+                        placeholder="🔍 Search gear (e.g. “g” → Guitar Amp)…"
+                        style={{ ...S.input, marginBottom: 12, fontSize: 13 }} />
+                      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "10px 12px", alignItems: "center", marginBottom: 4 }}>
+                        <div /><div style={{ fontSize: 10.5, color: C.textMuted, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.06em" }}>Item</div>
+                        <div style={{ fontSize: 10.5, color: C.textMuted, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.06em", textAlign: "center" }}>$/Day</div>
+                        <div style={{ fontSize: 10.5, color: C.textMuted, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.06em", textAlign: "center" }}>Qty</div>
+                      </div>
+                      {(() => {
+                        const q = quoteGearSearch.trim().toLowerCase();
+                        const matches = g => !q || g.name.toLowerCase().split(/\s+/).some(w => w.startsWith(q));
+                        const visibleGear = config.gear.filter(g => matches(g) || (quoteForm.rentals[g.name] || 0) > 0);
+                        if (visibleGear.length === 0) return <div style={{ padding: "14px 0", fontSize: 12.5, color: C.textFaint, textAlign: "center" }}>No gear matches "{quoteGearSearch}".</div>;
+                        return visibleGear.map(({ name: item, rate: defaultRate }) => {
+                          const qty = quoteForm.rentals[item] || 0;
+                          const checked = qty > 0;
+                          return (
+                            <div key={item} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "0 12px", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.borderSoft}` }}>
+                              <div onClick={() => setQF("rentals", { ...quoteForm.rentals, [item]: checked ? 0 : 1 })}
+                                style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${C.border}`, background: checked ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+                                {checked && <span style={{ color: C.accentText, fontSize: 10, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                              </div>
+                              <span style={{ fontSize: 13, color: checked ? C.text : C.textFaint }}>{item}</span>
+                              <input type="number" value={quoteForm.rentalRates?.[item] ?? defaultRate} onChange={e => setQF("rentalRates", { ...quoteForm.rentalRates, [item]: e.target.value })}
+                                style={{ ...S.input, width: 72, padding: "6px 8px", fontSize: 13, textAlign: "center", borderRadius: 3 }} />
+                              {checked ? (
+                                <input type="number" min="1" value={qty} onChange={e => setQF("rentals", { ...quoteForm.rentals, [item]: parseInt(e.target.value, 10) || 1 })}
+                                  style={{ ...S.input, width: 56, padding: "6px 8px", fontSize: 13, textAlign: "center", borderRadius: 3 }} />
+                              ) : <div />}
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+                  )}
+                </div>
+
                 <button onClick={checkQuoteAvailability} disabled={!quoteReadyToCheck || checkingQuote}
                   style={{ padding: "12px 28px", background: C.accent, color: C.accentText, border: "none", borderRadius: 3, cursor: "pointer", fontFamily: FONT.mono, fontSize: 12, letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: "600", opacity: (!quoteReadyToCheck || checkingQuote) ? 0.5 : 1, marginBottom: 28 }}>
                   {checkingQuote ? "Checking…" : "Check Availability"}
@@ -3133,6 +3286,11 @@ export default function App() {
                               </label>
                             );
                           })}
+                          {quoteHasRentals && Object.values(quoteForm.rentals).some(q => q > 0) && (
+                            <div style={{ marginTop: 8, padding: "8px 12px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, fontSize: 12.5, color: C.textMuted }}>
+                              Rentals for this date: {quoteRentalSummaryText(quoteForm, slot) || "—"} <span style={{ color: C.textFaint }}>(${calcQuoteRentalTotal(quoteForm, slot).toFixed(2)} total)</span>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -3142,6 +3300,53 @@ export default function App() {
                       <textarea value={quoteForm.greeting} onChange={e => setQF("greeting", e.target.value)} rows={2}
                         placeholder={`Hi ${firstName(quoteForm.contactName) || "there"}, here's what we've got available for you — let us know which works best and we'll get you booked in.`}
                         style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                    </div>
+
+                    {/* Reply within an existing email thread */}
+                    <div style={{ marginBottom: 18 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", marginBottom: quoteReplyMode ? 10 : 0 }}
+                        onClick={() => { const next = !quoteReplyMode; setQuoteReplyMode(next); if (next && quoteThreadResults === null) searchForQuoteThreads(); if (!next) { setQF("replyThreadId", null); setQF("replyMessageId", null); setQF("replyCc", ""); } }}>
+                        <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteReplyMode ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {quoteReplyMode && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                        </div>
+                        <span style={{ fontSize: 13.5, color: C.text }}>Reply within an existing email thread with {quoteForm.contactEmail || "this contact"}</span>
+                      </label>
+
+                      {quoteReplyMode && (
+                        <div style={{ background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, padding: "14px 16px" }}>
+                          {searchingQuoteThreads && <div style={{ fontSize: 12.5, color: C.textMuted }}>Searching Gmail…</div>}
+                          {!searchingQuoteThreads && quoteThreadResults?.length === 0 && (
+                            <div style={{ fontSize: 12.5, color: C.textFaint }}>No existing threads found with {quoteForm.contactEmail}. This will send as a new email instead.</div>
+                          )}
+                          {!searchingQuoteThreads && quoteThreadResults?.map(t => (
+                            <div key={t.id} onClick={() => pickQuoteThread(t)}
+                              style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "9px 10px", borderRadius: 3, cursor: "pointer", marginBottom: 4, background: quoteForm.replyThreadId === t.id ? C.surface2 : "transparent", border: `1px solid ${quoteForm.replyThreadId === t.id ? C.accent : "transparent"}` }}>
+                              <div style={{ width: 14, height: 14, borderRadius: "50%", border: `1px solid ${C.border}`, marginTop: 2, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                {quoteForm.replyThreadId === t.id && <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent }} />}
+                              </div>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: C.text, fontWeight: "500", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.subject}</div>
+                                <div style={{ fontSize: 11.5, color: C.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {t.date ? t.date.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " — " : ""}{t.snippet}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                          {!searchingQuoteThreads && quoteThreadResults?.length > 0 && (
+                            <div style={{ marginTop: 6, fontSize: 11, color: C.textFaint }}>
+                              {quoteForm.replyThreadId ? "Quote will be sent as a reply in the selected thread." : "Pick a thread above, or leave none selected to send as a new email."}
+                            </div>
+                          )}
+                          {quoteForm.replyThreadId && (
+                            <div style={{ marginTop: 12 }}>
+                              <label style={S.label}>CC <span style={{ color: C.textFaint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— pulled from who was on this thread, edit as needed</span></label>
+                              <input type="text" value={quoteForm.replyCc} onChange={e => setQF("replyCc", e.target.value)}
+                                placeholder="comma-separated emails, or leave blank for none"
+                                style={{ ...S.input, fontSize: 12.5 }} />
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     <button onClick={sendQuote} disabled={sendingQuote || !quoteForm.contactEmail}
