@@ -1258,18 +1258,26 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvent
   const entries = [...rooms].map(room => {
     const todays = todayEvents.filter(e => e.room === room).sort((a, b) => new Date(a.start) - new Date(b.start));
     const prepEv = prepEvents.find(e => e.room === room) || null;
-    const continuing = !!(prepEv && todays.some(t => t.id === prepEv.id));
+    // Two different flavors of "nothing to actually reset for": a Lock Out
+    // literally spanning both days (same calendar event, matched by id), or
+    // an Hourly booking where the exact same band is back again tomorrow —
+    // different bookings, but no reason to tear the room down in between.
+    const sameEventContinuing = !!(prepEv && todays.some(t => t.id === prepEv.id));
+    const sameBandReturning = !!(prepEv && !prepEv.allDay && !sameEventContinuing && todays.some(t => bandNameFromEventTitle(t.title) === bandNameFromEventTitle(prepEv.title)));
+    const continuing = sameEventContinuing || sameBandReturning; // both get the same "no action needed" color treatment
     let prepLine = null;
     let nextBooking = null;
-    if (prepEv && continuing) {
+    if (sameEventContinuing) {
       prepLine = "Lock Out continues";
+    } else if (sameBandReturning) {
+      prepLine = "Staying Set Up";
     } else if (prepEv) {
       const rentals = parseRentalsFromDescription(prepEv.description);
       const backline = backlineNoteFor(prepEv.allDay, rentals);
       const verb = todays.length > 0 ? "Reset Room" : "Set Up Room";
-      const typeLabel = prepEv.allDay ? "Lock Out" : "Hourly booking";
+      const typeLabel = prepEv.allDay ? "Lock Out next" : "Hourly booking next";
       const incomingBand = bandNameFromEventTitle(prepEv.title);
-      prepLine = `${verb} — ${backline} (${incomingBand} — ${typeLabel} loading in next)`;
+      prepLine = `${verb} — ${backline} (${typeLabel} — ${incomingBand})`;
     } else {
       const upcoming = futureEvents.filter(e => e.room === room).sort((a, b) => parseEventBoundary(a.start, a.allDay) - parseEventBoundary(b.start, b.allDay))[0] || null;
       if (upcoming) {
