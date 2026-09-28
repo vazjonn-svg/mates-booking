@@ -1268,7 +1268,8 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvent
       const backline = backlineNoteFor(prepEv.allDay, rentals);
       const verb = todays.length > 0 ? "Reset Room" : "Set Up Room";
       const typeLabel = prepEv.allDay ? "Lock Out" : "Hourly booking";
-      prepLine = `${verb} — ${backline} (${typeLabel} loading in next)`;
+      const incomingBand = bandNameFromEventTitle(prepEv.title);
+      prepLine = `${verb} — ${backline} (${incomingBand} — ${typeLabel} loading in next)`;
     } else {
       const upcoming = futureEvents.filter(e => e.room === room).sort((a, b) => parseEventBoundary(a.start, a.allDay) - parseEventBoundary(b.start, b.allDay))[0] || null;
       if (upcoming) {
