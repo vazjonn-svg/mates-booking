@@ -901,7 +901,7 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
     const slotLabel = isHourly
       ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
       : formatDateRange(slot.eventDate, slot.endDate);
-    const rooms = (quoteResults?.[slot.key] || []).filter(r => r.available && quoteSelections[`${slot.key}__${r.room}`]);
+    const rooms = (quoteResults?.[slot.key] || []).filter(r => quoteSelections[`${slot.key}__${r.room}`]); // checked = offered, even if the calendar shows it booked (staff's call, e.g. a longer Lock Out taking priority)
     const rentalsText = quoteRentalSummaryText(quoteForm, slot);
     const roomsHtml = rooms.length === 0
       ? `<p style="margin:0;font-size:13px;color:#9ca3af;">No rooms available for this time.</p>`
@@ -1731,8 +1731,8 @@ export default function App() {
               ? new Date(`${slot.eventDate}T${slot.endTime}:00`).toISOString()
               : new Date(`${slot.endDate}T23:59:59`).toISOString();
             const conflicts = await checkRoomConflicts(token, loc.calendarId, timeMinISO, timeMaxISO);
-            return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: conflicts.length === 0 };
-          } catch { return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: false }; }
+            return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: conflicts.length === 0, conflicts };
+          } catch { return { room, rate: quoteForm.bookingType === "hourly" ? rates.hourly : rates.daily, available: false, conflicts: [] }; }
         }));
         results[slot.key] = roomChecks;
       }
@@ -3326,19 +3326,20 @@ export default function App() {
 
                 {quoteResults && (
                   <>
-                    <Sect>Available Rooms — Review Before Sending</Sect>
+                    <Sect>Rooms — Review Before Sending</Sect>
+                    <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 14 }}>Free rooms are checked. Rooms the calendar shows as booked are listed unchecked — check one to offer it anyway (e.g. a longer Lock Out taking priority over a shorter booking).</p>
                     {quoteForm.slots.map(slot => {
                       const rooms = quoteResults[slot.key] || [];
-                      const available = rooms.filter(r => r.available);
+                      const listed = [...rooms.filter(r => r.available), ...rooms.filter(r => !r.available)]; // free first, then booked
                       const slotLabel = quoteForm.bookingType === "hourly"
                         ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
                         : formatDateRange(slot.eventDate, slot.endDate);
                       return (
                         <div key={slot.key} style={{ marginBottom: 20 }}>
                           <div style={{ fontSize: 13.5, fontWeight: "600", color: C.text, marginBottom: 8 }}>{slotLabel}</div>
-                          {available.length === 0 ? (
-                            <div style={{ fontSize: 13, color: C.textFaint, padding: "8px 0" }}>Nothing available for this option.</div>
-                          ) : available.map(r => {
+                          {listed.length === 0 ? (
+                            <div style={{ fontSize: 13, color: C.textFaint, padding: "8px 0" }}>No rooms have a rate for this booking type.</div>
+                          ) : listed.map(r => {
                             const loc = getRoomLocation(r.room);
                             const selKey = `${slot.key}__${r.room}`;
                             return (
@@ -3347,9 +3348,20 @@ export default function App() {
                                 <div style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteSelections[selKey] ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
                                   {quoteSelections[selKey] && <span style={{ color: C.accentText, fontSize: 10, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
                                 </div>
-                                <div>
+                                <div style={{ opacity: r.available || quoteSelections[selKey] ? 1 : 0.7 }}>
                                   <span style={{ fontSize: 13.5, color: C.text }}>{r.room}{loc.locationName ? `, ${loc.locationName}` : ""}</span>
                                   <span style={{ fontSize: 13, color: C.textMuted, marginLeft: 8 }}>{quoteForm.bookingType === "hourly" ? `$${r.rate}/hr` : `$${r.rate}/day`}</span>
+                                  {!r.available && <span style={{ fontSize: 10.5, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.05em", color: C.warning, marginLeft: 10 }}>Booked on calendar</span>}
+                                  {!r.available && r.conflicts?.length > 0 && (
+                                    <div style={{ fontSize: 12, color: C.warning, marginTop: 2 }}>
+                                      {r.conflicts.slice(0, 3).map(c => {
+                                        const band = bandNameFromEventTitle(c.title);
+                                        const when = c.allDay ? "all day" : `${parseEventBoundary(c.start, false).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} – ${parseEventBoundary(c.end, false).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+                                        return <div key={c.id}>{band} · {when}</div>;
+                                      })}
+                                      {r.conflicts.length > 3 && <div>+{r.conflicts.length - 3} more</div>}
+                                    </div>
+                                  )}
                                   {loc.description && <div style={{ fontSize: 12, color: C.textFaint, marginTop: 2 }}>{loc.description}</div>}
                                 </div>
                               </label>
