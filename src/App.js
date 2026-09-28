@@ -386,10 +386,11 @@ function calcQuoteRentalTotal(quoteForm, slot) {
     return sum + rate * qty * units;
   }, 0);
 }
-function quoteRentalSummaryText(quoteForm, slot) {
+function quoteRentalSummaryText(quoteForm, slot, { includePrices = true } = {}) {
   const units = calcQuoteRentalUnits(quoteForm, slot);
   return Object.entries(quoteForm.rentals || {}).filter(([, q]) => q > 0)
     .map(([item, q]) => {
+      if (!includePrices) return units > 1 ? `${item} ×${q} × ${units} days` : `${item} ×${q}`;
       const rate = parseFloat((quoteForm.rentalRates || {})[item]) || 0;
       const sub = rate * q * units;
       return units > 1 ? `${item} ×${q} × ${units} days ($${sub.toFixed(2)})` : `${item} ×${q} ($${sub.toFixed(2)})`;
@@ -902,7 +903,8 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
       ? `${fmtDate(slot.eventDate)} · ${fmtTime(slot.startTime)} – ${fmtTime(slot.endTime)}`
       : formatDateRange(slot.eventDate, slot.endDate);
     const rooms = (quoteResults?.[slot.key] || []).filter(r => quoteSelections[`${slot.key}__${r.room}`]); // checked = offered, even if the calendar shows it booked (staff's call, e.g. a longer Lock Out taking priority)
-    const rentalsText = quoteRentalSummaryText(quoteForm, slot);
+    const hidePricing = !!quoteForm.hidePricing; // e.g. extended bookings where staff would rather discuss a discounted rate directly
+    const rentalsText = quoteRentalSummaryText(quoteForm, slot, { includePrices: !hidePricing });
     const roomsHtml = rooms.length === 0
       ? `<p style="margin:0;font-size:13px;color:#9ca3af;">No rooms available for this time.</p>`
       : rooms.map(r => {
@@ -912,7 +914,7 @@ function buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) {
           <div style="border-top:1px solid #f3f4f6;padding:12px 0;">
             <table style="width:100%;border-collapse:collapse;"><tr>
               <td style="font-size:14px;font-weight:700;color:#111827;vertical-align:baseline;">${roomLabel}</td>
-              <td style="font-size:13px;color:#111827;font-weight:600;text-align:right;white-space:nowrap;vertical-align:baseline;padding-left:12px;">${isHourly ? `$${r.rate}/hr` : `$${r.rate}/day`}</td>
+              ${hidePricing ? "" : `<td style="font-size:13px;color:#111827;font-weight:600;text-align:right;white-space:nowrap;vertical-align:baseline;padding-left:12px;">${isHourly ? `$${r.rate}/hr` : `$${r.rate}/day`}</td>`}
             </tr></table>
             ${loc.address ? `<p style="margin:4px 0 0;font-size:12px;">${mapsLinkHtml(loc.address, loc.address, "color:#2563eb;text-decoration:none;")}</p>` : ""}
             ${loc.description ? `<p style="margin:8px 0 0;font-size:12.5px;color:#6b7280;line-height:1.6;">${escapeHtml(loc.description).replace(/\n/g, "<br>")}</p>` : ""}
@@ -1650,6 +1652,7 @@ export default function App() {
   const emptyQuoteForm = () => ({
     bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "",
     rentals: {}, rentalRates: Object.fromEntries(config.gear.map(g => [g.name, g.rate])),
+    hidePricing: false, // client email only — staff review screen always shows real numbers
     replyThreadId: null, replyMessageId: null, replyCc: "", // set when staff pick a thread to reply into
   });
   const [quoteForm, setQuoteForm] = useState(emptyQuoteForm);
@@ -3268,7 +3271,7 @@ export default function App() {
 
                 <Sect>Equipment Rentals</Sect>
                 <div style={{ marginBottom: 22 }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: 14, userSelect: "none" }} onClick={() => setQuoteHasRentals(v => !v)}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: 14, userSelect: "none" }} onClick={() => { if (quoteHasRentals) setQF("rentals", {}); setQuoteHasRentals(v => !v); }}>
                     <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteHasRentals ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                       {quoteHasRentals && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
                     </div>
@@ -3382,6 +3385,14 @@ export default function App() {
                         placeholder={`Hi ${firstName(quoteForm.contactName) || "there"}, here's what we've got available for you — let us know which works best and we'll get you booked in.`}
                         style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
                     </div>
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", marginBottom: 20 }}
+                      onClick={() => setQF("hidePricing", !quoteForm.hidePricing)}>
+                      <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteForm.hidePricing ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        {quoteForm.hidePricing && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+                      </div>
+                      <span style={{ fontSize: 13.5, color: C.text }}>🙈 Hide pricing in this quote <span style={{ color: C.textFaint, fontSize: 12 }}>— rates and rental prices stay off the email; you'll still see them here</span></span>
+                    </label>
 
                     {/* Email preview — recomputed live from current selections/greeting/rentals, so it's never stale */}
                     <div style={{ border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden", marginBottom: 20 }}>
