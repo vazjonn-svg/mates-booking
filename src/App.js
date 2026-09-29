@@ -171,6 +171,16 @@ function newSessionRow(room = "", rates = { hourly: null, daily: null }, type = 
     createdEventId: null, createdEventCalendarId: null,
   };
 }
+// Copies every field of an existing session row (room, date/times, rate,
+// type) into a new row with its own fresh key — for the "Duplicate" button,
+// so staff filling several similar sessions can adjust just the date or
+// hours on the copy instead of re-entering everything. createdEventId/
+// createdEventCalendarId reset to null since the duplicate hasn't created
+// its own calendar event yet.
+function duplicateSessionRow(s) {
+  _sessionKeyCounter += 1;
+  return { ...s, key: `s${Date.now()}_${_sessionKeyCounter}`, createdEventId: null, createdEventCalendarId: null };
+}
 // A candidate date/time a client could work with — Quote checks every
 // eligible room against each of these, independent of the others.
 let _quoteSlotKeyCounter = 0;
@@ -2680,6 +2690,16 @@ export default function App() {
                               ⚠️ {s.room} already has {sConflicts.length} booking{sConflicts.length !== 1 ? "s" : ""} in this window
                             </div>
                           )}
+                          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+                            <button onClick={() => {
+                              const idx = form.sessions.findIndex(x => x.key === s.key);
+                              const next = [...form.sessions];
+                              next.splice(idx + 1, 0, duplicateSessionRow(s));
+                              setF("sessions", next);
+                            }} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 3, color: C.textMuted, cursor: "pointer", fontFamily: FONT.mono, fontSize: 11, letterSpacing: "0.03em", textTransform: "uppercase" }}>
+                              ⧉ Duplicate
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
