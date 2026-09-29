@@ -968,40 +968,24 @@ function buildEmailHTML(form) {
     ? `${fmtTime(form.startTime)} – ${fmtTime(form.endTime)} (${hrs} hrs @ $${form.hourlyRate}/hr)`
     : `${numDays} day(s) @ $${form.dailyRate}/day`;
 
-  // Multi-session: gate codes can differ by room, so list every unique room
-  // used in the batch instead of a single location block.
+  // One consistent Locations line for every booking, single-room or multi —
+  // "Mates [LocationName] — Address" (with Gate Code appended in bold when
+  // that location has one). Used to be a separate, more prominent "Gate
+  // Access Required" box for single-room bookings, but that meant single and
+  // multi-session confirmations looked inconsistent, and it's what caused a
+  // shared location's gate code to print twice on a 2-room multi-session
+  // booking. Every room used in this booking, deduped by unique address
+  // (several rooms usually share one location) so each location appears once
+  // regardless of how many of its rooms are in this booking.
   const uniqueRoomLocations = form.multiSession
     ? [...new Map(form.sessions.filter(s => s.room).map(s => [s.room, getRoomLocation(s.room)])).entries()]
-    : [];
-
-  const gateBlock = form.multiSession
-    ? (uniqueRoomLocations.some(([, loc]) => loc.gateCode) ? `
-    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:18px 22px;margin-bottom:24px;">
-      <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.06em;">🔐 Gate Access</p>
-      ${uniqueRoomLocations.filter(([, loc]) => loc.gateCode).map(([room, loc]) => `
-      <p style="margin:0 0 8px;font-size:13px;color:#78350f;"><strong>${room}:</strong> Gate Code <strong>${loc.gateCode}</strong></p>`).join("")}
-    </div>` : "")
-    : (location.gateCode ? `
-    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:18px 22px;margin-bottom:24px;">
-      <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.06em;">🔐 Gate Access Required</p>
-      <p style="margin:0 0 10px;font-size:13px;color:#78350f;line-height:1.5;">${location.accessNote}</p>
-      <div style="background:#fff;border:1px solid #fde68a;border-radius:6px;padding:10px 16px;display:inline-block;">
-        <span style="font-size:13px;color:#92400e;font-weight:500;">Gate Code: </span>
-        <span style="font-size:22px;font-weight:700;color:#92400e;letter-spacing:0.15em;">${location.gateCode}</span>
-      </div>
-    </div>` : "");
-
-  // Multi-session: one line per unique address (not per room, since several
-  // rooms usually share a location) instead of repeating full addresses next
-  // to every session row in the table above.
-  const uniqueLocations = form.multiSession
-    ? [...new Map(uniqueRoomLocations.map(([, loc]) => [loc.address, loc])).values()]
-    : [];
-  const locationsLegend = form.multiSession && uniqueLocations.length > 0 ? `
+    : [[form.room, location]];
+  const uniqueLocations = [...new Map(uniqueRoomLocations.map(([, loc]) => [loc.address, loc])).values()];
+  const locationsLegend = uniqueLocations.length > 0 ? `
     <div style="margin-bottom:24px;">
       <p style="margin:0 0 8px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;">Locations</p>
       ${uniqueLocations.map(loc => `
-      <p style="margin:0 0 4px;font-size:12.5px;">${mapsLinkHtml(loc.address, `${loc.locationName ? `<strong>${loc.locationName}</strong> — ` : ""}${loc.address}`, "color:#2563eb;text-decoration:none;")}</p>`).join("")}
+      <p style="margin:0 0 4px;font-size:12.5px;">${mapsLinkHtml(loc.address, `${loc.locationName ? `<strong>Mates ${loc.locationName}</strong> — ` : ""}${loc.address}`, "color:#2563eb;text-decoration:none;")}${loc.gateCode ? ` — <strong>Gate Code ${loc.gateCode}</strong>` : ""}</p>`).join("")}
     </div>` : "";
 
   const rentalsRow = rentals ? `
@@ -1070,11 +1054,7 @@ function buildEmailHTML(form) {
           </tr>
           <tr style="border-top:1px solid #f3f4f6;">
             <td style="padding:8px 0;font-size:13px;color:#6b7280;font-weight:500;">Room</td>
-            <td style="padding:8px 0;font-size:14px;color:#111827;font-weight:600;">${form.room}</td>
-          </tr>
-          <tr style="border-top:1px solid #f3f4f6;">
-            <td style="padding:8px 0;font-size:13px;color:#6b7280;font-weight:500;vertical-align:top;">Address</td>
-            <td style="padding:8px 0;font-size:14px;font-weight:500;line-height:1.5;">${mapsLinkHtml(location.address, location.address, "color:#2563eb;text-decoration:none;")}</td>
+            <td style="padding:8px 0;font-size:14px;color:#111827;font-weight:600;">${form.room}${location.locationName ? `, ${location.locationName}` : ""}</td>
           </tr>
           <tr style="border-top:1px solid #f3f4f6;">
             <td style="padding:8px 0;font-size:13px;color:#6b7280;font-weight:500;">Date</td>
@@ -1108,7 +1088,6 @@ function buildEmailHTML(form) {
           ${bookingRows}
         </table>
       </div>
-      ${gateBlock}
       ${locationsLegend}
       ${form.hidePricingInEmail ? "" : `
       <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:20px 24px;margin-bottom:28px;">
