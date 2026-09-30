@@ -453,7 +453,16 @@ const GOOGLE_SCOPES = [
 function useGoogleAuth() {
   const [token, setToken] = useState(null);
   const [authLoading, setAuthLoading] = useState(false);
+  // True the moment ANY Google API call anywhere in the app comes back 401 —
+  // almost always a token that quietly expired while the tab sat idle, not a
+  // real permissions problem. Drives a banner that stays up (not a toast
+  // that can be missed) until the next successful sign-in.
+  const [authExpired, setAuthExpired] = useState(false);
   const clientRef = useRef(null);
+
+  useEffect(() => {
+    registerAuthExpiredHandler(() => { setToken(null); setAuthExpired(true); });
+  }, []);
 
   useEffect(() => {
     const script = document.createElement("script");
@@ -465,7 +474,7 @@ function useGoogleAuth() {
         client_id: GOOGLE_CLIENT_ID,
         scope: GOOGLE_SCOPES,
         callback: (resp) => {
-          if (resp.access_token) setToken(resp.access_token);
+          if (resp.access_token) { setToken(resp.access_token); setAuthExpired(false); }
           setAuthLoading(false);
         },
       });
@@ -479,8 +488,37 @@ function useGoogleAuth() {
     clientRef.current.requestAccessToken();
   }, []);
 
-  const signOut = useCallback(() => setToken(null), []);
-  return { token, authLoading, signIn, signOut };
+  const signOut = useCallback(() => { setToken(null); setAuthExpired(false); }, []);
+  return { token, authLoading, authExpired, signIn, signOut };
+}
+
+// ─── Auth-expiry detection ─────────────────────────────────────────────────
+// Google's access tokens expire after roughly an hour. Any of the API calls
+// below coming back 401 almost always means exactly that, not some other
+// permissions problem — so every one of them funnels through these two
+// helpers, which notify the app once, globally, the moment it happens:
+// clears the stale token and puts up a banner that stays until reconnecting,
+// rather than each call site failing quietly or with its own separate,
+// easy-to-miss error. Set once from the root component via
+// registerAuthExpiredHandler; these are plain module functions (outside the
+// component), so a small registry like this is how they reach back into it.
+let _onAuthExpired = null;
+function registerAuthExpiredHandler(fn) { _onAuthExpired = fn; }
+function checkAuthExpired(res) {
+  if (res.status === 401 && _onAuthExpired) _onAuthExpired();
+}
+// For catch blocks that show their own toast on failure — lets them skip a
+// second, more confusing message ("couldn't save — check the console") when
+// the banner above already explains exactly what happened and what to do.
+function isAuthExpired(e) { return e?.status === 401; }
+// Throws a consistent, status-tagged error for any non-ok response — used by
+// every call site that should stop and surface a failure to the user.
+function throwIfNotOk(res, label) {
+  if (res.ok) return;
+  checkAuthExpired(res);
+  const err = new Error(`${label}: ${res.status}`);
+  err.status = res.status;
+  throw err;
 }
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -489,7 +527,7 @@ async function googleCalendarCreate(token, calendarId, event) {
   const res = await fetch(url, {
     method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(event),
   });
-  if (!res.ok) throw new Error(`Calendar: ${res.status}`);
+  throwIfNotOk(res, "Calendar");
   return res.json();
 }
 
@@ -500,7 +538,7 @@ async function googleCalendarMove(token, calendarId, eventId, destCalendarId) {
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}/move?destination=${encodeURIComponent(destCalendarId)}&sendUpdates=none`,
     { method: "POST", headers: { Authorization: `Bearer ${token}` } }
   );
-  if (!res.ok) throw new Error(`Calendar move: ${res.status}`);
+  throwIfNotOk(res, "Calendar move");
   return res.json();
 }
 
@@ -511,7 +549,7 @@ async function googleCalendarPatch(token, calendarId, eventId, event) {
   const res = await fetch(url, {
     method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(event),
   });
-  if (!res.ok) throw new Error(`Calendar patch: ${res.status}`);
+  throwIfNotOk(res, "Calendar patch");
   return res.json();
 }
 
@@ -527,7 +565,7 @@ async function driveUploadFile(token, file) {
   const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name,mimeType", {
     method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
   });
-  if (!res.ok) throw new Error(`Drive upload: ${res.status}`);
+  throwIfNotOk(res, "Drive upload");
   const data = await res.json();
   try {
     await fetch(`https://www.googleapis.com/drive/v3/files/${data.id}/permissions`, {
@@ -545,7 +583,7 @@ async function driveDownloadFileBase64(token, fileId) {
   const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) throw new Error(`Drive download: ${res.status}`);
+  throwIfNotOk(res, "Drive download");
   const buffer = await res.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -566,7 +604,7 @@ async function sheetsCreateSpreadsheet(token, title) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ properties: { title } }),
   });
-  if (!res.ok) throw new Error(`Sheets create: ${res.status}`);
+  throwIfNotOk(res, "Sheets create");
   const data = await res.json();
   return { spreadsheetId: data.spreadsheetId, sheetTitle: data.sheets?.[0]?.properties?.title || "Sheet1" };
 }
@@ -577,14 +615,14 @@ async function sheetsAppendRows(token, spreadsheetId, sheetTitle, rows) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: rows }),
   });
-  if (!res.ok) throw new Error(`Sheets append: ${res.status}`);
+  throwIfNotOk(res, "Sheets append");
   return res.json();
 }
 async function sheetsGetValues(token, spreadsheetId, range) {
   const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) throw new Error(`Sheets get: ${res.status}`);
+  throwIfNotOk(res, "Sheets get");
   const data = await res.json();
   return data.values || [];
 }
@@ -595,7 +633,7 @@ async function sheetsUpdateRow(token, spreadsheetId, sheetTitle, rowNumber, rowV
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: [rowValues] }),
   });
-  if (!res.ok) throw new Error(`Sheets update: ${res.status}`);
+  throwIfNotOk(res, "Sheets update");
   return res.json();
 }
 const BOOKINGS_LOG_HEADERS = ["Reference ID", "Logged At", "Session Date", "Room", "Booking Type", "Band Name", "Contact Name", "Contact Email", "Time / Duration", "Rate", "Rentals", "Discount", "Grand Total", "Deposit Amount", "Deposit Due"];
@@ -641,7 +679,7 @@ async function googleCalendarAddAttachment(token, calendarId, eventId, existingA
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none&supportsAttachments=true`,
     { method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
   );
-  if (!res.ok) throw new Error(`Calendar attach: ${res.status}`);
+  throwIfNotOk(res, "Calendar attach");
   return res.json();
 }
 
@@ -692,7 +730,7 @@ async function gmailSendRaw(token, rawMessage, threadId) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ raw: toBase64Url(rawMessage), ...(threadId ? { threadId } : {}) }),
   });
-  if (!res.ok) throw new Error(`Gmail: ${res.status}`);
+  throwIfNotOk(res, "Gmail");
   return res.json();
 }
 
@@ -729,7 +767,7 @@ async function gmailSearchThreads(token, email) {
   const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/threads?q=${q}&maxResults=8`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!listRes.ok) throw new Error(`Gmail search: ${listRes.status}`);
+  throwIfNotOk(listRes, "Gmail search");
   const listData = await listRes.json();
   const threads = listData.threads || [];
 
@@ -774,7 +812,7 @@ async function gmailDraft(token, to, subject, htmlBody) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { raw: encoded } }),
   });
-  if (!res.ok) throw new Error(`Draft: ${res.status}`);
+  throwIfNotOk(res, "Draft");
   return res.json();
 }
 
@@ -789,7 +827,7 @@ async function listCalendarEvents(token) {
           `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(loc.calendarId)}/events?timeMin=${now}&maxResults=25&singleEvents=true&orderBy=startTime`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
-        if (!res.ok) return [];
+        if (!res.ok) { checkAuthExpired(res); return []; }
         const data = await res.json();
         return (data.items || []).map(ev => ({
           id: ev.id, title: ev.summary, room, calendarId: loc.calendarId,
@@ -818,7 +856,7 @@ async function listCalendarEventsInRange(token, timeMinISO, timeMaxISO) {
           `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(loc.calendarId)}/events?timeMin=${timeMinISO}&timeMax=${timeMaxISO}&maxResults=250&singleEvents=true&orderBy=startTime`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
-        if (!res.ok) return [];
+        if (!res.ok) { checkAuthExpired(res); return []; }
         const data = await res.json();
         return (data.items || []).map(ev => ({
           id: ev.id, calendarId: loc.calendarId, room,
@@ -845,7 +883,7 @@ async function googleCalendarUpdateDescription(token, calendarId, eventId, descr
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
     { method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ description }) }
   );
-  if (!res.ok) throw new Error(`Calendar update: ${res.status}`);
+  throwIfNotOk(res, "Calendar update");
   return res.json();
 }
 
@@ -859,7 +897,7 @@ async function checkRoomConflicts(token, calendarId, timeMinISO, timeMaxISO) {
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?timeMin=${timeMinISO}&timeMax=${timeMaxISO}&singleEvents=true&orderBy=startTime`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
-  if (!res.ok) return [];
+  if (!res.ok) { checkAuthExpired(res); return []; }
   const data = await res.json();
   return (data.items || []).map(ev => ({
     id: ev.id,
@@ -1382,7 +1420,7 @@ function Pill({ ok, label, okMsg, failMsg }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const { token, authLoading, signIn, signOut } = useGoogleAuth();
+  const { token, authLoading, authExpired, signIn, signOut } = useGoogleAuth();
   const [tab, setTab]           = useState("booking");
   const [step, setStep]         = useState("details");
   const [theme, setTheme] = useState(() => localStorage.getItem("matesTheme") || "dark");
@@ -2021,6 +2059,7 @@ export default function App() {
       try {
         const { attachment, newlyUploaded } = await ensureStagePlotUploaded();
         let failCount = 0;
+        let authFailure = false;
         const updatedSessions = [];
         for (let i = 0; i < form.sessions.length; i++) {
           const s = form.sessions[i];
@@ -2042,11 +2081,14 @@ export default function App() {
           } catch (e) {
             console.error(`Session ${i + 1} calendar:`, e);
             failCount++;
+            if (isAuthExpired(e)) authFailure = true;
             updatedSessions.push(s);
           }
         }
         setForm(f => ({ ...f, sessions: updatedSessions, ...(newlyUploaded ? { stagePlotAttachment: newlyUploaded } : {}) }));
-        if (failCount > 0) showToast(`${failCount} of ${form.sessions.length} sessions couldn't be saved — check the console`, "error");
+        // The banner above already explains an auth failure clearly — a second,
+        // vaguer "check the console" toast on top of it would just be noise.
+        if (failCount > 0 && !authFailure) showToast(`${failCount} of ${form.sessions.length} sessions couldn't be saved — check the console`, "error");
         setEmailPreview(buildEmailHTML({ ...form, sessions: updatedSessions }));
         setReplyMode(false); setThreadResults(null);
         setF("replyThreadId", null); setF("replyMessageId", null); setF("replyCc", "");
@@ -2054,7 +2096,7 @@ export default function App() {
         refreshPanelEvents();
       } catch (e) {
         console.error("Preview/Calendar (multi):", e);
-        showToast("Couldn't save sessions to the calendar — check the console for details", "error");
+        if (!isAuthExpired(e)) showToast("Couldn't save sessions to the calendar — check the console for details", "error");
       }
       setSavingPreview(false);
       return;
@@ -2087,7 +2129,7 @@ export default function App() {
       refreshPanelEvents();
     } catch (e) {
       console.error("Preview/Calendar:", e);
-      showToast("Couldn't save to the calendar — check the console for details", "error");
+      if (!isAuthExpired(e)) showToast("Couldn't save to the calendar — check the console for details", "error");
     }
     setSavingPreview(false);
   };
@@ -2390,6 +2432,16 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {/* Session-expired banner — stays up (unlike a toast) until reconnected, since this can happen after the tab's sat idle a while and is easy to miss otherwise */}
+      {authExpired && (
+        <div style={{ background: C.dangerBg, borderBottom: `1px solid ${C.dangerBorder}`, padding: "10px 36px", display: "flex", alignItems: "center", justifyContent: "center", gap: 14 }}>
+          <span style={{ fontSize: 13, color: C.danger, fontWeight: "500" }}>⚠️ Your Google session expired — anything you tried just now didn't go through.</span>
+          <button onClick={signIn} disabled={authLoading} style={{ padding: "6px 14px", fontSize: 11, letterSpacing: "0.05em", textTransform: "uppercase", fontFamily: FONT.mono, cursor: "pointer", borderRadius: 3, background: C.danger, color: "#fff", border: "none", fontWeight: "600", flexShrink: 0 }}>
+            {authLoading ? "Reconnecting…" : "Reconnect"}
+          </button>
+        </div>
+      )}
 
       {/* Toast */}
       {toast && <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, background: toast.type === "error" ? C.dangerBg : C.successBg, color: toast.type === "error" ? C.danger : C.success, border: `1px solid ${toast.type === "error" ? C.dangerBorder : C.successBorder}`, padding: "11px 20px", borderRadius: 3, fontSize: 13.5, fontWeight: "500", boxShadow: "0 4px 16px rgba(0,0,0,0.35)", animation: "slideIn 0.2s ease", backdropFilter: "blur(6px)" }}>{toast.msg}</div>}
