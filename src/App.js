@@ -998,6 +998,17 @@ function buildEmailHTML(form) {
       <p style="margin:0 0 4px;font-size:12.5px;">${mapsLinkHtml(loc.address, `${loc.locationName ? `<strong>Mates ${loc.locationName}</strong> — ` : ""}${loc.address}`, "color:#2563eb;text-decoration:none;")}${loc.gateCode ? ` — <strong>Gate Code ${loc.gateCode}</strong>` : ""}</p>`).join("")}
     </div>` : "";
 
+  // Single-room bookings only — the same room description staff can write in
+  // Settings for Quotes (size, PA specs, backline, etc.), shown here too so
+  // a confirmed client knows exactly what they're walking into. Left out of
+  // multi-session confirmations for now, where several different rooms could
+  // each need their own block and get noisy fast.
+  const roomDetailsBlock = (!form.multiSession && location.description) ? `
+    <div style="margin-bottom:24px;">
+      <p style="margin:0 0 8px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;">Room Details</p>
+      <p style="margin:0;font-size:12.5px;color:#6b7280;line-height:1.6;">${escapeHtml(location.description).replace(/\n/g, "<br>")}</p>
+    </div>` : "";
+
   const rentalsRow = rentals ? `
     <tr style="border-top:1px solid #f3f4f6;">
       <td style="padding:8px 0;font-size:13px;color:#6b7280;font-weight:500;vertical-align:top;width:130px;">Rentals</td>
@@ -1099,6 +1110,7 @@ function buildEmailHTML(form) {
         </table>
       </div>
       ${locationsLegend}
+      ${roomDetailsBlock}
       ${form.hidePricingInEmail ? "" : `
       <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:20px 24px;margin-bottom:28px;">
         <p style="margin:0 0 14px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">Pricing Summary</p>
