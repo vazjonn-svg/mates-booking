@@ -1113,16 +1113,7 @@ function buildEmailHTML(form) {
           ${depositRow}
         </table>
       </div>`}
-      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:20px 24px;margin-bottom:28px;">
-        <p style="margin:0 0 14px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">How to Pay</p>
-        <a href="${STUDIO_PORTAL_URL}" style="display:inline-block;background:#121212;color:#f2f2f0;font-size:13px;font-weight:600;padding:11px 22px;border-radius:6px;text-decoration:none;margin-bottom:16px;">Pay Online →</a>
-        <p style="margin:0 0 4px;font-size:13px;color:#374151;line-height:1.6;">
-          <strong>Or pay by Zelle:</strong> ${STUDIO_ZELLE}
-        </p>
-        <p style="margin:0;font-size:12px;color:#9ca3af;line-height:1.5;">
-          Please include "${escapeHtml(form.bandName)}" in the memo so we can match your payment${(!form.hidePricingInEmail && form.depositAmount) ? ` — $${parseFloat(form.depositAmount).toFixed(2)} due${form.depositDue ? ` by ${fmtShortDate(form.depositDue)}` : ""}` : ""}.
-        </p>
-      </div>
+      <p style="font-size:14px;color:#374151;margin:0 0 24px;line-height:1.6;">We will send an invoice and a link to our payment portal closer to your date.</p>
       <p style="font-size:14px;color:#374151;margin:0 0 6px;line-height:1.6;">We look forward to having you at ${STUDIO_NAME}!</p>
       <p style="font-size:14px;color:#374151;margin:0 0 24px;line-height:1.6;">
         Questions? Email <a href="mailto:${STUDIO_EMAIL}" style="color:#111827;font-weight:600;">${STUDIO_EMAIL}</a>.
@@ -3113,7 +3104,7 @@ export default function App() {
                   <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: form.hidePricingInEmail ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {form.hidePricingInEmail && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
                   </div>
-                  <span style={{ fontSize: 13.5, color: C.text }}>🙈 Hide pricing/totals in this confirmation email <span style={{ color: C.textFaint }}>— "How to Pay" still shows, just without dollar amounts</span></span>
+                  <span style={{ fontSize: 13.5, color: C.text }}>🙈 Hide pricing/totals in this confirmation email</span>
                 </label>
 
                 {(() => {
