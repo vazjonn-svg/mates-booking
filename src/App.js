@@ -1437,10 +1437,17 @@ export default function App() {
   const [loadingCal, setLoadingCal] = useState(false);
 
   // ─── Daily Rundown ────────────────────────────────────────────────────────
-  const [rundownDate, setRundownDate] = useState(() => addDays(new Date(), 1)); // "Prep" section — defaults to tomorrow, still navigable
-  const [rundownEvents, setRundownEvents] = useState([]);
+  // "Anchor" is the day this rundown is reporting ON — defaults to the real
+  // today, but is fully navigable so a rundown can be built and sent for ANY
+  // day, e.g. preparing Saturday's and Sunday's rundowns in advance on a
+  // Friday when no one's checking the app over the weekend. "Prep" is always
+  // exactly the day after the anchor — derived on the fly, never its own
+  // separate navigation, since every real use of this tab treats it that way.
+  const [rundownAnchorDate, setRundownAnchorDate] = useState(() => new Date());
+  const rundownPrepDate = addDays(rundownAnchorDate, 1);
+  const [rundownEvents, setRundownEvents] = useState([]); // the prep day's bookings
   const [rundownLoading, setRundownLoading] = useState(false);
-  const [todayEvents, setTodayEvents] = useState([]); // "Today" section — always the real current date, not navigable
+  const [todayEvents, setTodayEvents] = useState([]); // the anchor day's bookings
   const [todayLoading, setTodayLoading] = useState(false);
   const [checkedCrew, setCheckedCrew] = useState(() => new Set());
   const [sendingRundown, setSendingRundown] = useState(false);
@@ -1451,7 +1458,7 @@ export default function App() {
     if (tab !== "rundown" || !token) return;
     let cancelled = false;
     setRundownLoading(true); setRundownSent(false);
-    const dayStart = new Date(rundownDate); dayStart.setHours(0, 0, 0, 0);
+    const dayStart = new Date(rundownPrepDate); dayStart.setHours(0, 0, 0, 0);
     const dayEnd = addDays(dayStart, 1);
     listCalendarEventsInRange(token, dayStart.toISOString(), dayEnd.toISOString())
       .then(evs => { if (!cancelled) setRundownEvents(evs.sort((a, b) => (a.room || "").localeCompare(b.room || ""))); })
@@ -1459,12 +1466,12 @@ export default function App() {
       .finally(() => { if (!cancelled) setRundownLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, token, rundownDate.getTime()]);
+  }, [tab, token, rundownAnchorDate.getTime()]);
 
   useEffect(() => {
     if (tab !== "rundown" || !token) return;
     let cancelled = false;
-    const dayEnd = addDays(new Date(rundownDate), 1); dayEnd.setHours(0, 0, 0, 0);
+    const dayEnd = addDays(new Date(rundownPrepDate), 1); dayEnd.setHours(0, 0, 0, 0);
     const lookaheadEnd = addDays(dayEnd, 120); // ~4 months out — generous, but bounded so "next booking" never searches forever
     listCalendarEventsInRange(token, dayEnd.toISOString(), lookaheadEnd.toISOString())
       .then(evs => { if (!cancelled) setFutureEvents(evs); })
@@ -1472,20 +1479,21 @@ export default function App() {
       .finally(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, token, rundownDate.getTime()]);
+  }, [tab, token, rundownAnchorDate.getTime()]);
 
   useEffect(() => {
     if (tab !== "rundown" || !token) return;
     let cancelled = false;
     setTodayLoading(true);
-    const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+    const dayStart = new Date(rundownAnchorDate); dayStart.setHours(0, 0, 0, 0);
     const dayEnd = addDays(dayStart, 1);
     listCalendarEventsInRange(token, dayStart.toISOString(), dayEnd.toISOString())
       .then(evs => { if (!cancelled) setTodayEvents(evs); })
-      .catch(() => { if (!cancelled) showToast("Couldn't load today's bookings", "error"); })
+      .catch(() => { if (!cancelled) showToast("Couldn't load that day's bookings", "error"); })
       .finally(() => { if (!cancelled) setTodayLoading(false); });
     return () => { cancelled = true; };
-  }, [tab, token]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, token, rundownAnchorDate.getTime()]);
 
   const toggleCrewChecked = i => setCheckedCrew(prev => {
     const next = new Set(prev);
@@ -1498,13 +1506,13 @@ export default function App() {
     if (recipients.length === 0) { showToast("Check off at least one crew member first", "error"); return; }
     setSendingRundown(true);
     try {
-      const subject = `${STUDIO_NAME} Daily Rundown — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`;
+      const subject = `${STUDIO_NAME} Daily Rundown — ${rundownAnchorDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`;
       const roomBoxHtml = r => {
         const stagePlot = r.prepEv ? (r.prepEv.attachments || []).find(a => a.title?.startsWith("Stage Plot")) : null;
         const todayLines = r.todays.length > 0
           ? r.todays.map(ev => {
               const timeStr = ev.allDay
-                ? (() => { const { dayNumber, totalDays } = lockoutDayInfo(ev, new Date()); return `All day ${dayNumber}/${totalDays}`; })()
+                ? (() => { const { dayNumber, totalDays } = lockoutDayInfo(ev, rundownAnchorDate); return `All day ${dayNumber}/${totalDays}`; })()
                 : `${new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} – ${new Date(ev.end).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
               return `<div style="font-size:13px;color:#111827;">${stripEventFlag(ev.title)} — <span style="color:#6b7280;">${timeStr}</span></div>`;
             }).join("")
@@ -1521,7 +1529,7 @@ export default function App() {
             ${stagePlot ? `<a href="${stagePlot.fileUrl}" style="display:inline-block;margin-top:4px;font-size:12px;color:#2563eb;text-decoration:none;">📎 View Stage Plot</a>` : ""}
           </div>`;
       };
-      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownDate, futureEvents);
+      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents);
       const groupsHtml = roomGroups.length === 0 ? `<p style="font-size:14px;color:#6b7280;">Nothing on the calendar for either day.</p>` : roomGroups.map(g => `
         <p style="margin:18px 0 6px;font-size:13px;font-weight:700;color:#111827;text-transform:uppercase;letter-spacing:0.06em;">${g.locationName}</p>
         ${g.rooms.map(roomBoxHtml).join("")}`).join("");
@@ -1530,7 +1538,7 @@ export default function App() {
         <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;color:#111827;">
           <div style="background:#121212;padding:24px 28px;border-radius:4px 4px 0 0;">
             <h1 style="margin:0;color:#f2f2f0;font-size:20px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">${STUDIO_NAME} Daily Rundown</h1>
-            <p style="margin:6px 0 0;color:#9c9c9c;font-size:13px;">Today (${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}) → Prepping for ${rundownDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</p>
+            <p style="margin:6px 0 0;color:#9c9c9c;font-size:13px;">${rundownAnchorDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} → Prepping for ${rundownPrepDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</p>
           </div>
           <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 4px 4px;">
             ${groupsHtml}
@@ -3531,14 +3539,14 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
               <Sect>Daily Rundown</Sect>
             </div>
-            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 20 }}>What's happening today, and how to prepare for the next booking day.</p>
+            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 20 }}>What's happening on the selected day, and how to prepare for the one after it — navigate ahead to build and send a rundown in advance, e.g. for the weekend.</p>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
-              <button onClick={() => setRundownDate(d => addDays(d, -1))} style={{ width: 28, height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.text, borderRadius: 3, cursor: "pointer", fontSize: 14 }}>‹</button>
-              <button onClick={() => setRundownDate(addDays(new Date(), 1))} style={{ padding: "0 14px", height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 3, cursor: "pointer", fontSize: 11, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.03em" }}>Tomorrow</button>
-              <button onClick={() => setRundownDate(d => addDays(d, 1))} style={{ width: 28, height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.text, borderRadius: 3, cursor: "pointer", fontSize: 14 }}>›</button>
+              <button onClick={() => setRundownAnchorDate(d => addDays(d, -1))} style={{ width: 28, height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.text, borderRadius: 3, cursor: "pointer", fontSize: 14 }}>‹</button>
+              <button onClick={() => setRundownAnchorDate(new Date())} style={{ padding: "0 14px", height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 3, cursor: "pointer", fontSize: 11, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.03em" }}>Today</button>
+              <button onClick={() => setRundownAnchorDate(d => addDays(d, 1))} style={{ width: 28, height: 28, background: C.surface3, border: `1px solid ${C.border}`, color: C.text, borderRadius: 3, cursor: "pointer", fontSize: 14 }}>›</button>
               <span style={{ fontSize: 13, color: C.textMuted, marginLeft: 6 }}>
-                Today ({new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}) → prepping for <strong style={{ color: C.text }}>{rundownDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</strong>
+                <strong style={{ color: C.text }}>{rundownAnchorDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</strong> → prepping for <strong style={{ color: C.text }}>{rundownPrepDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</strong>
               </span>
             </div>
 
@@ -3550,7 +3558,7 @@ export default function App() {
               <div style={{ color: C.textFaint, fontSize: 14, padding: "20px 0" }}>Nothing on the calendar for either day.</div>
             ) : (
               <div style={{ marginBottom: 26 }}>
-                {buildRoomRundown(todayEvents, rundownEvents, config, rundownDate, futureEvents).map((group, gi) => (
+                {buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents).map((group, gi) => (
                   <div key={gi} style={{ marginBottom: 18 }}>
                     <div style={{ fontSize: 15, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.05em", color: C.text, fontWeight: "600", marginBottom: 8 }}>{group.locationName}</div>
                     {group.rooms.map((r, i) => {
@@ -3563,7 +3571,7 @@ export default function App() {
                           {r.todays.length > 0 ? r.todays.map((ev, ti) => (
                             <div key={ti} style={{ fontSize: 13, color: C.text, marginBottom: 2 }}>
                               {stripEventFlag(ev.title)} — <span style={{ color: C.textMuted }}>
-                                {ev.allDay ? (() => { const { dayNumber, totalDays } = lockoutDayInfo(ev, new Date()); return `All day ${dayNumber}/${totalDays}`; })() : `${new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} – ${new Date(ev.end).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`}
+                                {ev.allDay ? (() => { const { dayNumber, totalDays } = lockoutDayInfo(ev, rundownAnchorDate); return `All day ${dayNumber}/${totalDays}`; })() : `${new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} – ${new Date(ev.end).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`}
                               </span>
                             </div>
                           )) : (
