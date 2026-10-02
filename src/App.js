@@ -410,6 +410,19 @@ function quoteRentalSummaryText(quoteForm, slot, { includePrices = true } = {}) 
 // ─── localStorage ─────────────────────────────────────────────────────────────
 const CLIENTS_KEY = "mates_clients_v1";
 function loadClients() { try { return JSON.parse(localStorage.getItem(CLIENTS_KEY) || "[]"); } catch { return []; } }
+// Case-by-case instructions staff add to a specific room on a specific day's
+// rundown — e.g. "client bringing their own gear, skip the usual setup" or
+// "extra chairs requested, grab from storage". Saved locally so a stray
+// refresh (or the auth-expiry reconnect from earlier) doesn't lose what was
+// typed, keyed by day + room so navigating to a different date never shows
+// a stale note from another day. This is per-browser only, same as config —
+// notes typed here won't show up on Bob's computer unless this is synced
+// the same way Settings config already is (Download/Import, or just the
+// shared Google login).
+const RUNDOWN_NOTES_KEY = "mates_rundown_notes_v1";
+function loadRundownNotes() { try { return JSON.parse(localStorage.getItem(RUNDOWN_NOTES_KEY) || "{}"); } catch { return {}; } }
+function saveRundownNotes(notes) { try { localStorage.setItem(RUNDOWN_NOTES_KEY, JSON.stringify(notes)); } catch {} }
+function rundownNoteKey(date, room) { return `${isoDateKey(date)}__${room}`; }
 function persistClient(c) {
   const all = loadClients();
   const idx = all.findIndex(x => x.email === c.email);
@@ -1282,9 +1295,10 @@ function bandNameFromEventTitle(title) {
 // no instruction at all, looks ahead (via futureEvents, already fetched for
 // every room in one batched call) and surfaces whatever's booked next on
 // that room's calendar, so staff know if something's coming soon or not.
-function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvents = []) {
+function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvents = [], notes = {}) {
   const rooms = new Set([...todayEvents, ...prepEvents].map(e => e.room).filter(Boolean));
   const prepDateKey = isoDateKey(prepDate);
+  const anchorDate = addDays(prepDate, -1); // prep is always anchor+1, so this recovers the day the rundown is actually FOR
   const entries = [...rooms].map(room => {
     const todays = todayEvents.filter(e => e.room === room).sort((a, b) => new Date(a.start) - new Date(b.start));
     const prepEv = prepEvents.find(e => e.room === room) || null;
@@ -1322,7 +1336,8 @@ function buildRoomRundown(todayEvents, prepEvents, config, prepDate, futureEvent
         };
       }
     }
-    return { room, address: getRoomLocation(room).address, todays, prepEv, continuing, prepLine, nextBooking, flag: prepEv ? parseEventFlag(prepEv.title) : null };
+    const note = notes[rundownNoteKey(anchorDate, room)] || "";
+    return { room, address: getRoomLocation(room).address, todays, prepEv, continuing, prepLine, nextBooking, note, flag: prepEv ? parseEventFlag(prepEv.title) : null };
   });
   const rank = e => !e.prepEv ? 2 : (e.prepEv.allDay ? 0 : 1);
   entries.sort((a, b) => {
@@ -1453,6 +1468,17 @@ export default function App() {
   const [sendingRundown, setSendingRundown] = useState(false);
   const [rundownSent, setRundownSent] = useState(false);
   const [futureEvents, setFutureEvents] = useState([]); // everything booked, across all rooms, in the ~4 months after the prep date — used to surface "next booking" when a room's prep day is empty
+  const [rundownNotes, setRundownNotes] = useState(loadRundownNotes);
+  const [editingNoteFor, setEditingNoteFor] = useState(null); // room name currently showing its note textarea, or null
+  const setRundownNote = (room, text) => {
+    setRundownNotes(prev => {
+      const key = rundownNoteKey(rundownAnchorDate, room);
+      const next = { ...prev };
+      if (text.trim()) next[key] = text; else delete next[key]; // don't keep empty entries around forever
+      saveRundownNotes(next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (tab !== "rundown" || !token) return;
@@ -1527,9 +1553,10 @@ export default function App() {
             ${r.prepLine ? `<div style="font-size:13px;color:${r.continuing ? "#2563eb" : "#b45309"};font-weight:600;margin-top:6px;">→ ${r.prepLine}</div>` : ""}
             ${nextLineHtml}
             ${stagePlot ? `<a href="${stagePlot.fileUrl}" style="display:inline-block;margin-top:4px;font-size:12px;color:#2563eb;text-decoration:none;">📎 View Stage Plot</a>` : ""}
+            ${r.note ? `<div style="margin-top:8px;padding:7px 10px;background:#fff;border:1px solid #e5e7eb;border-radius:3px;font-size:12.5px;color:#374151;font-style:italic;">📝 ${escapeHtml(r.note).replace(/\n/g, "<br>")}</div>` : ""}
           </div>`;
       };
-      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents);
+      const roomGroups = buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents, rundownNotes);
       const groupsHtml = roomGroups.length === 0 ? `<p style="font-size:14px;color:#6b7280;">Nothing on the calendar for either day.</p>` : roomGroups.map(g => `
         <p style="margin:18px 0 6px;font-size:13px;font-weight:700;color:#111827;text-transform:uppercase;letter-spacing:0.06em;">${g.locationName}</p>
         ${g.rooms.map(roomBoxHtml).join("")}`).join("");
@@ -3558,7 +3585,7 @@ export default function App() {
               <div style={{ color: C.textFaint, fontSize: 14, padding: "20px 0" }}>Nothing on the calendar for either day.</div>
             ) : (
               <div style={{ marginBottom: 26 }}>
-                {buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents).map((group, gi) => (
+                {buildRoomRundown(todayEvents, rundownEvents, config, rundownPrepDate, futureEvents, rundownNotes).map((group, gi) => (
                   <div key={gi} style={{ marginBottom: 18 }}>
                     <div style={{ fontSize: 15, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.05em", color: C.text, fontWeight: "600", marginBottom: 8 }}>{group.locationName}</div>
                     {group.rooms.map((r, i) => {
@@ -3593,6 +3620,21 @@ export default function App() {
                             <a href={stagePlot.fileUrl} target="_blank" rel="noreferrer" style={{ display: "inline-block", marginTop: 4, fontSize: 12, color: C.info, textDecoration: "none" }}>
                               📎 View Stage Plot
                             </a>
+                          )}
+                          {editingNoteFor === r.room ? (
+                            <div style={{ marginTop: 10 }}>
+                              <textarea autoFocus defaultValue={r.note} rows={2} placeholder="Case-by-case note for this room, today only — e.g. client bringing their own gear, extra chairs requested…"
+                                onBlur={e => { setRundownNote(r.room, e.target.value); setEditingNoteFor(null); }}
+                                style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "8px 10px", fontSize: 12.5, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                            </div>
+                          ) : r.note ? (
+                            <div onClick={() => setEditingNoteFor(r.room)} style={{ marginTop: 8, padding: "7px 10px", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, fontSize: 12.5, color: C.text, fontStyle: "italic", cursor: "pointer" }}>
+                              📝 {r.note}
+                            </div>
+                          ) : (
+                            <button onClick={() => setEditingNoteFor(r.room)} style={{ marginTop: 8, background: "transparent", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 11.5, fontFamily: FONT.mono, textTransform: "uppercase", letterSpacing: "0.03em", padding: 0 }}>
+                              + Add note
+                            </button>
                           )}
                         </div>
                       );
