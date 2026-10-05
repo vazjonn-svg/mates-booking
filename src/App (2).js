@@ -78,7 +78,7 @@ function getConfig() {
     const stored = loadStoredConfig();
     // Merge with defaults so anyone with a config saved before a field
     // existed (e.g. nightCrew) doesn't crash on the missing key.
-    _configCache = { rooms: DEFAULT_ROOMS, gear: DEFAULT_GEAR, nightCrew: DEFAULT_NIGHT_CREW, closingNotes: DEFAULT_CLOSING_NOTES, bookingsLogSheetId: null, hourlyPolicyFile: null, lockoutPolicyFile: null, contactsSheetId: null, ...stored };
+    _configCache = { rooms: DEFAULT_ROOMS, gear: DEFAULT_GEAR, nightCrew: DEFAULT_NIGHT_CREW, closingNotes: DEFAULT_CLOSING_NOTES, bookingsLogSheetId: null, hourlyPolicyFile: null, lockoutPolicyFile: null, contactsSheetId: null, defaultCc: "", ...stored };
   }
   return _configCache;
 }
@@ -150,7 +150,8 @@ const EMPTY_FORM = {
   depositAmount: "", depositDue: "",
   stagePlotFile: null, // File object, in-memory only — uploaded to Drive on confirm
   stagePlotAttachment: null, // set once uploaded, so re-previewing doesn't re-upload
-  replyThreadId: null, replyMessageId: null, replyCc: "", // set when staff pick a thread to reply into
+  cc: null, threadCcAdded: [], // cc === null means "use Settings → Default CC"; a string (even empty) means staff edited it for this email
+  replyThreadId: null, replyMessageId: null, // set when staff pick a thread to reply into
   staffAttention: false, // manual "needs booking staff attention" flag
   discountEnabled: false, discountMode: "percent", discountTarget: "total", discountValue: "",
   hidePricingInEmail: true, // defaults ON — pricing/rentals stay off the client email unless staff opts in; the Review screen still shows real numbers to staff either way
@@ -749,8 +750,8 @@ async function gmailSendRaw(token, rawMessage, threadId) {
   return res.json();
 }
 
-async function gmailSend(token, to, subject, htmlBody, attachments) {
-  return gmailSendRaw(token, buildRawEmailMessage({ to, subject, htmlBody, attachments }));
+async function gmailSend(token, to, subject, htmlBody, attachments, cc) {
+  return gmailSendRaw(token, buildRawEmailMessage({ to, cc, subject, htmlBody, attachments }));
 }
 
 // Sends the confirmation as a REPLY inside an existing thread instead of a new
@@ -775,6 +776,49 @@ function extractEmails(headerValue) {
   if (!headerValue) return [];
   const matches = headerValue.match(/[^\s<>",]+@[^\s<>",]+/g) || [];
   return [...new Set(matches.map(e => e.toLowerCase()))];
+}
+
+// ─── CC handling ──────────────────────────────────────────────────────────
+// The CC box on confirmations and quotes is free text typed/pasted by staff,
+// so it's parsed and checked before anything goes out: split on commas/
+// semicolons/newlines, pull the address out of "Name <a@b.com>" forms, drop
+// duplicates and the primary recipient (no point CC'ing someone who's already
+// on the To line), and report anything that isn't a plausible email instead of
+// silently dropping it — a typo'd address quietly vanishing would mean someone
+// who was supposed to be copied never finds out. Because every kept address
+// has to match a strict pattern with no whitespace, quotes or angle brackets,
+// nothing typed here can inject extra email headers either.
+const CC_EMAIL_RE = /^[^\s@<>",;]+@[^\s@<>",;]+\.[^\s@<>",;]+$/;
+function ccTokenEmail(token) { const m = token.match(/<([^<>]+)>/); return (m ? m[1] : token).trim(); }
+function parseCcList(text, toEmail) {
+  const to = (toEmail || "").trim().toLowerCase();
+  const seen = new Set(), list = [], invalid = [];
+  for (const raw of (text || "").split(/[,;\n]+/)) {
+    const t = raw.trim();
+    if (!t) continue;
+    const email = ccTokenEmail(t);
+    if (!CC_EMAIL_RE.test(email)) { invalid.push(t); continue; }
+    const key = email.toLowerCase();
+    if (key === to || seen.has(key)) continue;
+    seen.add(key); list.push(email);
+  }
+  return { list, invalid };
+}
+// Replying into a thread adds that thread's other participants to the CC box.
+// Tracks exactly which addresses the thread added (and removes just those when
+// switching threads or un-ticking "reply in thread"), so picking thread A and
+// then thread B never leaves A's people on an email about B.
+function applyThreadCc(ccText, prevAdded, newExtras) {
+  const prev = new Set((prevAdded || []).map(e => e.toLowerCase()));
+  const tokens = (ccText || "").split(/[,;\n]+/).map(t => t.trim()).filter(Boolean)
+    .filter(t => !prev.has(ccTokenEmail(t).toLowerCase()));
+  const have = new Set(tokens.map(t => ccTokenEmail(t).toLowerCase()));
+  const added = [];
+  for (const e of newExtras || []) {
+    const k = e.toLowerCase();
+    if (!have.has(k)) { tokens.push(e); have.add(k); added.push(e); }
+  }
+  return { text: tokens.join(", "), added };
 }
 
 async function gmailSearchThreads(token, email) {
@@ -1743,10 +1787,12 @@ export default function App() {
     bandName: "", contactName: "", contactEmail: "", bookingType: "hourly", slots: [newQuoteSlot()], greeting: "",
     rentals: {}, rentalRates: Object.fromEntries(config.gear.map(g => [g.name, g.rate])),
     hidePricing: false, // client email only — staff review screen always shows real numbers
-    replyThreadId: null, replyMessageId: null, replyCc: "", // set when staff pick a thread to reply into
+    cc: null, threadCcAdded: [], // null = use Settings → Default CC; a string means edited for this quote
+    replyThreadId: null, replyMessageId: null, // set when staff pick a thread to reply into
   });
   const [quoteForm, setQuoteForm] = useState(emptyQuoteForm);
   const setQF = (key, val) => setQuoteForm(f => ({ ...f, [key]: val }));
+  const quoteCc = quoteForm.cc ?? (config.defaultCc || ""); // Settings' default list until staff edit it for this quote
   const [quoteResults, setQuoteResults] = useState(null); // null = not checked yet; else { [slotKey]: [{room, rate, available}] }
   const [quoteSelections, setQuoteSelections] = useState({}); // { "slotKey__RoomName": boolean }
   const [checkingQuote, setCheckingQuote] = useState(false);
@@ -1771,7 +1817,13 @@ export default function App() {
     setSearchingQuoteThreads(false);
   };
   const pickQuoteThread = t => {
-    setQuoteForm(f => ({ ...f, replyThreadId: t.id, replyMessageId: t.messageId, replyCc: (t.cc || []).join(", ") }));
+    setQuoteForm(f => {
+      const r = applyThreadCc(f.cc ?? (config.defaultCc || ""), f.threadCcAdded, t.cc);
+      return { ...f, replyThreadId: t.id, replyMessageId: t.messageId, cc: r.text, threadCcAdded: r.added };
+    });
+  };
+  const clearQuoteReplyThread = () => {
+    setQuoteForm(f => ({ ...f, replyThreadId: null, replyMessageId: null, cc: applyThreadCc(f.cc ?? (config.defaultCc || ""), f.threadCcAdded, []).text, threadCcAdded: [] }));
   };
 
   // Client autocomplete — same saved-clients list the booking form uses, kept
@@ -1840,14 +1892,17 @@ export default function App() {
   const sendQuote = async () => {
     if (!token) { showToast("Connect Google first", "error"); return; }
     if (!quoteForm.contactEmail) { showToast("Add a contact email first", "error"); return; }
+    const ccCheck = parseCcList(quoteCc, quoteForm.contactEmail);
+    if (ccCheck.invalid.length > 0) { showToast(`Fix the CC box first — not an email address: ${ccCheck.invalid.join(", ")}`, "error"); return; }
+    const ccHeader = ccCheck.list.length > 0 ? ccCheck.list.join(", ") : undefined;
     setSendingQuote(true);
     try {
       const subject = `${STUDIO_NAME} — Room Availability${quoteForm.bandName ? ` for ${quoteForm.bandName}` : ""}`;
       const htmlBody = buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections);
       if (quoteForm.replyThreadId) {
-        await gmailSendInThread(token, quoteForm.contactEmail, subject, htmlBody, quoteForm.replyThreadId, quoteForm.replyMessageId, quoteForm.replyCc || undefined);
+        await gmailSendInThread(token, quoteForm.contactEmail, subject, htmlBody, quoteForm.replyThreadId, quoteForm.replyMessageId, ccHeader);
       } else {
-        await gmailSend(token, quoteForm.contactEmail, subject, htmlBody);
+        await gmailSend(token, quoteForm.contactEmail, subject, htmlBody, undefined, ccHeader);
       }
       setQuoteSent(true);
       // Save/update this client so they're available to autofill on the New
@@ -2142,7 +2197,7 @@ export default function App() {
         if (failCount > 0 && !authFailure) showToast(`${failCount} of ${form.sessions.length} sessions couldn't be saved — check the console`, "error");
         setEmailPreview(buildEmailHTML({ ...form, sessions: updatedSessions }));
         setReplyMode(false); setThreadResults(null);
-        setF("replyThreadId", null); setF("replyMessageId", null); setF("replyCc", "");
+        clearReplyThread();
         setStep("review");
         refreshPanelEvents();
       } catch (e) {
@@ -2175,7 +2230,7 @@ export default function App() {
       setForm(f => ({ ...f, createdEventId: eventId, createdEventCalendarId: eventCalendarId, ...(newlyUploaded ? { stagePlotAttachment: newlyUploaded } : {}) }));
       setEmailPreview(buildEmailHTML(form));
       setReplyMode(false); setThreadResults(null);
-      setF("replyThreadId", null); setF("replyMessageId", null); setF("replyCc", "");
+      clearReplyThread();
       setStep("review");
       refreshPanelEvents();
     } catch (e) {
@@ -2192,8 +2247,16 @@ export default function App() {
     catch { showToast("Couldn't search Gmail", "error"); setThreadResults([]); }
     setSearchingThreads(false);
   };
+  // What the CC box shows: Settings' default list until staff edit it for this email
+  const formCc = form.cc ?? (config.defaultCc || "");
   const pickThread = t => {
-    setForm(f => ({ ...f, replyThreadId: t.id, replyMessageId: t.messageId, replyCc: (t.cc || []).join(", ") }));
+    setForm(f => {
+      const r = applyThreadCc(f.cc ?? (config.defaultCc || ""), f.threadCcAdded, t.cc);
+      return { ...f, replyThreadId: t.id, replyMessageId: t.messageId, cc: r.text, threadCcAdded: r.added };
+    });
+  };
+  const clearReplyThread = () => {
+    setForm(f => ({ ...f, replyThreadId: null, replyMessageId: null, cc: applyThreadCc(f.cc ?? (config.defaultCc || ""), f.threadCcAdded, []).text, threadCcAdded: [] }));
   };
 
   // Confirm — the calendar event(s) already exist (created/updated at Preview
@@ -2288,6 +2351,11 @@ export default function App() {
 
   const handleConfirm = async () => {
     if (!token) { showToast("Please connect Google first", "error"); return; }
+    // Checked before anything is saved or sent, so a typo in the CC box can't
+    // leave a booking half-confirmed.
+    const ccCheck = parseCcList(formCc, form.contactEmail);
+    if (ccCheck.invalid.length > 0) { showToast(`Fix the CC box first — not an email address: ${ccCheck.invalid.join(", ")}`, "error"); return; }
+    const ccHeader = ccCheck.list.length > 0 ? ccCheck.list.join(", ") : undefined;
     setStep("confirm");
     setLoading(true);
     let calOk = false, emailOk = false;
@@ -2309,9 +2377,9 @@ export default function App() {
       try {
         const attachments = await getPolicyAttachments();
         if (form.replyThreadId) {
-          await gmailSendInThread(token, form.contactEmail, subject, htmlBody, form.replyThreadId, form.replyMessageId, form.replyCc || undefined, attachments);
+          await gmailSendInThread(token, form.contactEmail, subject, htmlBody, form.replyThreadId, form.replyMessageId, ccHeader, attachments);
         } else {
-          await gmailSend(token, form.contactEmail, subject, htmlBody, attachments);
+          await gmailSend(token, form.contactEmail, subject, htmlBody, attachments, ccHeader);
         }
         emailOk = true;
       } catch (e) { console.error("Gmail:", e); }
@@ -2346,9 +2414,9 @@ export default function App() {
     try {
       const attachments = await getPolicyAttachments();
       if (form.replyThreadId) {
-        await gmailSendInThread(token, form.contactEmail, subject, htmlBody, form.replyThreadId, form.replyMessageId, form.replyCc || undefined, attachments);
+        await gmailSendInThread(token, form.contactEmail, subject, htmlBody, form.replyThreadId, form.replyMessageId, ccHeader, attachments);
       } else {
-        await gmailSend(token, form.contactEmail, subject, htmlBody, attachments);
+        await gmailSend(token, form.contactEmail, subject, htmlBody, attachments, ccHeader);
       }
       emailOk = true;
     } catch (e) { console.error("Gmail:", e); }
@@ -3145,7 +3213,7 @@ export default function App() {
                 {/* Email preview rendered */}
                 <div style={{ border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden", marginBottom: 16 }}>
                   <div style={{ background: C.surface3, padding: "10px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.textMuted, fontWeight: "600", letterSpacing: "0.06em", textTransform: "uppercase", fontFamily: FONT.mono }}>
-                    Email Preview — sending to {form.contactEmail}
+                    Email Preview — sending to {form.contactEmail}{parseCcList(formCc, form.contactEmail).list.length > 0 ? ` · cc ${parseCcList(formCc, form.contactEmail).list.join(", ")}` : ""}
                   </div>
                   <div style={{ padding: "20px", background: "#e9e9e6" }}>
                     <div dangerouslySetInnerHTML={{ __html: emailPreview }} />
@@ -3156,10 +3224,21 @@ export default function App() {
                   📅 {form.multiSession ? `Saved all ${form.sessions.length} sessions to their calendars as tentative` : `Saved to ${form.room}'s calendar as tentative`} — no invite sent to client. It'll switch to confirmed once you send below.
                 </div>
 
+                {/* CC — pre-filled from Settings → Default CC, editable per email, works for new threads and replies alike */}
+                <div style={{ marginBottom: 18 }}>
+                  <label style={S.label}>CC <span style={{ color: C.textFaint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— pre-filled from Settings, edit for this email</span></label>
+                  <input type="text" value={formCc} onChange={e => setF("cc", e.target.value)}
+                    placeholder="comma-separated emails, or leave blank for none"
+                    style={{ ...S.input, fontSize: 12.5 }} />
+                  {parseCcList(formCc, form.contactEmail).invalid.length > 0 && (
+                    <div style={{ marginTop: 6, fontSize: 11.5, color: C.danger }}>Doesn't look like an email address: {parseCcList(formCc, form.contactEmail).invalid.join(", ")}</div>
+                  )}
+                </div>
+
                 {/* Reply within an existing email thread */}
                 <div style={{ marginBottom: 18 }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", marginBottom: replyMode ? 10 : 0 }}
-                    onClick={() => { const next = !replyMode; setReplyMode(next); if (next && threadResults === null) searchForThreads(); if (!next) { setF("replyThreadId", null); setF("replyMessageId", null); setF("replyCc", ""); } }}>
+                    onClick={() => { const next = !replyMode; setReplyMode(next); if (next && threadResults === null) searchForThreads(); if (!next) { clearReplyThread(); } }}>
                     <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: replyMode ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                       {replyMode && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
                     </div>
@@ -3191,13 +3270,8 @@ export default function App() {
                           {form.replyThreadId ? "Confirmation will be sent as a reply in the selected thread." : "Pick a thread above, or leave none selected to send as a new email."}
                         </div>
                       )}
-                      {form.replyThreadId && (
-                        <div style={{ marginTop: 12 }}>
-                          <label style={S.label}>CC <span style={{ color: C.textFaint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— pulled from who was on this thread, edit as needed</span></label>
-                          <input type="text" value={form.replyCc} onChange={e => setF("replyCc", e.target.value)}
-                            placeholder="comma-separated emails, or leave blank for none"
-                            style={{ ...S.input, fontSize: 12.5 }} />
-                        </div>
+                      {form.replyThreadId && form.threadCcAdded?.length > 0 && (
+                        <div style={{ marginTop: 8, fontSize: 11, color: C.textFaint }}>Others on this thread were added to the CC box above — edit it there.</div>
                       )}
                     </div>
                   )}
@@ -3511,17 +3585,28 @@ export default function App() {
                     {/* Email preview — recomputed live from current selections/greeting/rentals, so it's never stale */}
                     <div style={{ border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden", marginBottom: 20 }}>
                       <div style={{ background: C.surface3, padding: "10px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.textMuted, fontWeight: "600", letterSpacing: "0.06em", textTransform: "uppercase", fontFamily: FONT.mono }}>
-                        Email Preview — sending to {quoteForm.contactEmail || "…"}
+                        Email Preview — sending to {quoteForm.contactEmail || "…"}{parseCcList(quoteCc, quoteForm.contactEmail).list.length > 0 ? ` · cc ${parseCcList(quoteCc, quoteForm.contactEmail).list.join(", ")}` : ""}
                       </div>
                       <div style={{ padding: "20px", background: "#e9e9e6" }}>
                         <div dangerouslySetInnerHTML={{ __html: buildQuoteEmailHTML(quoteForm, quoteResults, quoteSelections) }} />
                       </div>
                     </div>
 
+                    {/* CC — pre-filled from Settings → Default CC, editable per quote, works for new threads and replies alike */}
+                    <div style={{ marginBottom: 18 }}>
+                      <label style={S.label}>CC <span style={{ color: C.textFaint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— pre-filled from Settings, edit for this quote</span></label>
+                      <input type="text" value={quoteCc} onChange={e => setQF("cc", e.target.value)}
+                        placeholder="comma-separated emails, or leave blank for none"
+                        style={{ ...S.input, fontSize: 12.5 }} />
+                      {parseCcList(quoteCc, quoteForm.contactEmail).invalid.length > 0 && (
+                        <div style={{ marginTop: 6, fontSize: 11.5, color: C.danger }}>Doesn't look like an email address: {parseCcList(quoteCc, quoteForm.contactEmail).invalid.join(", ")}</div>
+                      )}
+                    </div>
+
                     {/* Reply within an existing email thread */}
                     <div style={{ marginBottom: 18 }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none", marginBottom: quoteReplyMode ? 10 : 0 }}
-                        onClick={() => { const next = !quoteReplyMode; setQuoteReplyMode(next); if (next && quoteThreadResults === null) searchForQuoteThreads(); if (!next) { setQF("replyThreadId", null); setQF("replyMessageId", null); setQF("replyCc", ""); } }}>
+                        onClick={() => { const next = !quoteReplyMode; setQuoteReplyMode(next); if (next && quoteThreadResults === null) searchForQuoteThreads(); if (!next) { clearQuoteReplyThread(); } }}>
                         <div style={{ width: 18, height: 18, borderRadius: 3, border: `1px solid ${C.border}`, background: quoteReplyMode ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                           {quoteReplyMode && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
                         </div>
@@ -3553,13 +3638,8 @@ export default function App() {
                               {quoteForm.replyThreadId ? "Quote will be sent as a reply in the selected thread." : "Pick a thread above, or leave none selected to send as a new email."}
                             </div>
                           )}
-                          {quoteForm.replyThreadId && (
-                            <div style={{ marginTop: 12 }}>
-                              <label style={S.label}>CC <span style={{ color: C.textFaint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— pulled from who was on this thread, edit as needed</span></label>
-                              <input type="text" value={quoteForm.replyCc} onChange={e => setQF("replyCc", e.target.value)}
-                                placeholder="comma-separated emails, or leave blank for none"
-                                style={{ ...S.input, fontSize: 12.5 }} />
-                            </div>
+                          {quoteForm.replyThreadId && quoteForm.threadCcAdded?.length > 0 && (
+                            <div style={{ marginTop: 8, fontSize: 11, color: C.textFaint }}>Others on this thread were added to the CC box above — edit it there.</div>
                           )}
                         </div>
                       )}
@@ -3889,6 +3969,18 @@ export default function App() {
             <div style={{ marginBottom: 34 }}>
               <textarea defaultValue={config.closingNotes} onBlur={e => updateConfig(prev => ({ ...prev, closingNotes: e.target.value }))} rows={4}
                 style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: FONT.body, resize: "vertical", boxSizing: "border-box" }} />
+            </div>
+
+            <Sect>Default CC</Sect>
+            <p style={{ fontSize: 12.5, color: C.textMuted, marginTop: -8, marginBottom: 12 }}>Copied on every confirmation and quote email, whether it starts a new thread or replies into one. Separate addresses with commas. You can still change it for any single email before sending. Kept here rather than in the code so these addresses never end up in the public repo.</p>
+            <div style={{ marginBottom: 34 }}>
+              <input key={config.defaultCc || "empty"} type="text" defaultValue={config.defaultCc || ""}
+                onBlur={e => updateConfig(prev => ({ ...prev, defaultCc: e.target.value }))}
+                placeholder="name@yourdomain.com, other@yourdomain.com"
+                style={S.input} />
+              {parseCcList(config.defaultCc).invalid.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 11.5, color: C.danger }}>Doesn't look like an email address: {parseCcList(config.defaultCc).invalid.join(", ")}</div>
+              )}
             </div>
 
             {/* Bookings Log */}
