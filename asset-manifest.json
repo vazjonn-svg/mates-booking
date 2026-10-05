@@ -1,10 +1,10 @@
 {
   "files": {
-    "main.js": "/mates-booking/static/js/main.d911069a.js",
+    "main.js": "/mates-booking/static/js/main.8174797a.js",
     "index.html": "/mates-booking/index.html",
-    "main.d911069a.js.map": "/mates-booking/static/js/main.d911069a.js.map"
+    "main.8174797a.js.map": "/mates-booking/static/js/main.8174797a.js.map"
   },
   "entrypoints": [
-    "static/js/main.d911069a.js"
+    "static/js/main.8174797a.js"
   ]
 }
