@@ -254,6 +254,13 @@ function calcDays(s, e) {
   const diff = Math.round((new Date(e + "T12:00:00") - new Date(s + "T12:00:00")) / 86400000) + 1;
   return diff > 0 ? diff : 1;
 }
+// When a Lock Out's start date is picked, the end date should open on that same day
+// (and never sit before it). Keeps a later end date staff already chose; fills in or
+// bumps forward one that's empty or now earlier than the start. ISO dates compare as strings.
+function endDateFor(start, currentEnd) {
+  if (!start) return currentEnd || "";
+  return (!currentEnd || currentEnd < start) ? start : currentEnd;
+}
 // ─── Date-grid helpers (Availability panel) ───────────────────────────────────
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 function startOfWeek(d) { const r = new Date(d); r.setHours(0, 0, 0, 0); r.setDate(r.getDate() - r.getDay()); return r; }
@@ -1549,11 +1556,11 @@ function MiniCheck({ checked, onChange, children }) {
 function Sect({ children }) {
   return <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textMuted, marginBottom: 14, paddingBottom: 9, borderBottom: `1px solid ${C.border}`, fontWeight: "500", fontFamily: FONT.mono }}>{children}</div>;
 }
-function Inp({ label, value, onChange, type = "text", span, placeholder, disabled }) {
+function Inp({ label, value, onChange, type = "text", span, placeholder, disabled, min }) {
   return (
     <div style={{ gridColumn: span ? `span ${span}` : undefined }}>
       {label && <label style={S.label}>{label}</label>}
-      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} disabled={disabled} style={{ ...S.input, opacity: disabled ? 0.5 : 1 }} />
+      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} disabled={disabled} min={min} style={{ ...S.input, opacity: disabled ? 0.5 : 1 }} />
     </div>
   );
 }
@@ -2848,11 +2855,11 @@ export default function App() {
                     <Sect>Schedule</Sect>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
                       <div>
-                        <Inp label={form.bookingType === "daily" ? "Start Date *" : "Date *"} value={form.eventDate} onChange={v => setF("eventDate", v)} type="date" />
+                        <Inp label={form.bookingType === "daily" ? "Start Date *" : "Date *"} value={form.eventDate} onChange={v => setForm(f => ({ ...f, eventDate: v, ...(f.bookingType === "daily" ? { endDate: endDateFor(v, f.endDate) } : {}) }))} type="date" />
                       </div>
                       {form.bookingType === "daily" ? (
                         <div>
-                          <Inp label="End Date *" value={form.endDate} onChange={v => setF("endDate", v)} type="date" />
+                          <Inp label="End Date *" value={form.endDate} onChange={v => setF("endDate", v)} type="date" min={form.eventDate || undefined} />
                           {form.eventDate && form.endDate && (() => {
                             const d = calcDays(form.eventDate, form.endDate);
                             return (
@@ -3002,11 +3009,11 @@ export default function App() {
                                 </div>
                                 <div>
                                   <label style={S.label}>Start Date *</label>
-                                  <input type="date" value={s.eventDate} onChange={e => updateRow({ eventDate: e.target.value })} style={S.input} />
+                                  <input type="date" value={s.eventDate} onChange={e => updateRow({ eventDate: e.target.value, endDate: endDateFor(e.target.value, s.endDate) })} style={S.input} />
                                 </div>
                                 <div>
                                   <label style={S.label}>End Date *</label>
-                                  <input type="date" value={s.endDate} onChange={e => updateRow({ endDate: e.target.value })} style={S.input} />
+                                  <input type="date" value={s.endDate} min={s.eventDate || undefined} onChange={e => updateRow({ endDate: e.target.value })} style={S.input} />
                                 </div>
                               </div>
                               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -3653,8 +3660,8 @@ export default function App() {
                         </div>
                       ) : (
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                          <div><label style={S.label}>Start Date *</label><input type="date" value={slot.eventDate} onChange={e => updateSlot({ eventDate: e.target.value })} style={S.input} /></div>
-                          <div><label style={S.label}>End Date *</label><input type="date" value={slot.endDate} onChange={e => updateSlot({ endDate: e.target.value })} style={S.input} /></div>
+                          <div><label style={S.label}>Start Date *</label><input type="date" value={slot.eventDate} onChange={e => updateSlot({ eventDate: e.target.value, endDate: endDateFor(e.target.value, slot.endDate) })} style={S.input} /></div>
+                          <div><label style={S.label}>End Date *</label><input type="date" value={slot.endDate} min={slot.eventDate || undefined} onChange={e => updateSlot({ endDate: e.target.value })} style={S.input} /></div>
                         </div>
                       )}
                     </div>
