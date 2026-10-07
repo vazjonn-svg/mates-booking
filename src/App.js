@@ -149,7 +149,12 @@ const EMPTY_FORM = {
   calendarNotes: "", hasRentals: false, rentals: {},
   depositAmount: "", depositDue: "",
   stagePlotFile: null, // File object, in-memory only — uploaded to Drive on confirm
-  stagePlotAttachment: null, // set once uploaded, so re-previewing doesn't re-upload
+  stagePlotAttachment: null, // set once uploaded, OR auto-attached from the client's saved profile — so re-previewing doesn't re-upload
+  // Client memory: what selectClient auto-filled from the client's saved profile, so
+  // switching to a different client can undo ONLY what we filled in (never staff's own typing).
+  autofill: null, // { email, notes, plot } — notes = the exact text filled in, plot = the saved plot's URL
+  saveNotesToClient: false, // "Save these notes to this client's profile" — on by default only when the notes came FROM the profile
+  savePlotToClient: true, // a newly-uploaded plot is saved to the client's profile unless staff un-ticks it
   cc: null, threadCcAdded: [], // cc === null means "use Settings → Default CC"; a string (even empty) means staff edited it for this email
   replyThreadId: null, replyMessageId: null, // set when staff pick a thread to reply into
   staffAttention: false, // manual "needs booking staff attention" flag
@@ -438,21 +443,51 @@ function persistClient(c) {
 // "last booked" date wins for the room/date fields (the sheet is usually the
 // more complete picture, but a very recent local booking may not have synced
 // to the sheet yet).
+const BOOKING_FIELDS = ["band", "name", "email", "lastRoom", "lastBooked"];
+const PROFILE_FIELDS = ["notes", "plotUrl", "plotTitle", "plotMime"];
+function profileTime(c) {
+  const t = c && c.profileUpdated ? new Date(c.profileUpdated).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+}
+function hasProfileData(c) { return !!c && PROFILE_FIELDS.some(k => !!c[k]); }
+// Sheet columns: A Band, B Name, C Email, D Last Room, E Last Booked,
+// F Notes, G Stage Plot Link, H Stage Plot Name, I Stage Plot Type, J Profile Updated.
+//
+// Booking fields (band/name/room/last booked): the more recent "last booked" wins,
+// but a blank never overwrites a real value on either side.
+// Profile fields (notes + stage plot) are one unit: whichever side was edited last
+// (Profile Updated) wins WHOLE — including a deliberate clear. Ties go to the sheet,
+// since it's the shared copy. A sheet row with profile data but no timestamp (someone
+// typed straight into the sheet) fills in a client that has none locally.
 function mergeClientRecords(local, sheetRows) {
   const byEmail = new Map();
   for (const c of local) {
     if (c.email) byEmail.set(c.email.toLowerCase(), c);
   }
   for (const row of sheetRows) {
-    const [band, name, email, lastRoom, lastBooked] = row;
+    const [band, name, email, lastRoom, lastBooked, notes, plotUrl, plotTitle, plotMime, profileUpdated] = row;
     if (!email) continue;
     const key = email.toLowerCase();
     const existing = byEmail.get(key);
-    const incoming = { band, name, email, lastRoom, lastBooked };
-    if (!existing) { byEmail.set(key, incoming); continue; }
+    const incoming = { band, name, email, lastRoom, lastBooked, notes, plotUrl, plotTitle, plotMime, profileUpdated };
+    if (!existing) {
+      const fresh = {};
+      for (const k of [...BOOKING_FIELDS, ...PROFILE_FIELDS, "profileUpdated"]) if (incoming[k]) fresh[k] = incoming[k];
+      byEmail.set(key, fresh);
+      continue;
+    }
     const existingDate = existing.lastBooked ? new Date(existing.lastBooked).getTime() : 0;
     const incomingDate = lastBooked ? new Date(lastBooked).getTime() : 0;
-    byEmail.set(key, incomingDate >= existingDate ? { ...existing, ...incoming } : { ...incoming, ...existing });
+    const [lo, hi] = incomingDate >= existingDate ? [existing, incoming] : [incoming, existing];
+    const merged = { ...existing };
+    for (const k of BOOKING_FIELDS) merged[k] = hi[k] || lo[k] || "";
+    const sheetT = profileTime(incoming), localT = profileTime(existing);
+    const sheetHas = hasProfileData(incoming);
+    if (sheetT > localT || (sheetT === localT && (sheetHas || sheetT > 0))) {
+      for (const k of PROFILE_FIELDS) merged[k] = incoming[k] || "";
+      merged.profileUpdated = incoming.profileUpdated || existing.profileUpdated || "";
+    }
+    byEmail.set(key, merged);
   }
   return [...byEmail.values()];
 }
@@ -624,9 +659,12 @@ async function sheetsCreateSpreadsheet(token, title) {
   const data = await res.json();
   return { spreadsheetId: data.spreadsheetId, sheetTitle: data.sheets?.[0]?.properties?.title || "Sheet1" };
 }
-async function sheetsAppendRows(token, spreadsheetId, sheetTitle, rows) {
+// inputOption defaults to USER_ENTERED (the Bookings Log relies on Sheets parsing
+// dates/numbers). The Contacts sheet passes "RAW" so free-text notes starting with
+// "=", "+" or "-" can never be turned into formulas and timestamps stay exact text.
+async function sheetsAppendRows(token, spreadsheetId, sheetTitle, rows, inputOption = "USER_ENTERED") {
   const range = encodeURIComponent(`${sheetTitle}!A1`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`, {
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=${inputOption}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: rows }),
@@ -642,9 +680,9 @@ async function sheetsGetValues(token, spreadsheetId, range) {
   const data = await res.json();
   return data.values || [];
 }
-async function sheetsUpdateRow(token, spreadsheetId, sheetTitle, rowNumber, rowValues) {
+async function sheetsUpdateRow(token, spreadsheetId, sheetTitle, rowNumber, rowValues, inputOption = "USER_ENTERED") {
   const range = encodeURIComponent(`${sheetTitle}!A${rowNumber}`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=${inputOption}`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: [rowValues] }),
@@ -653,7 +691,29 @@ async function sheetsUpdateRow(token, spreadsheetId, sheetTitle, rowNumber, rowV
   return res.json();
 }
 const BOOKINGS_LOG_HEADERS = ["Reference ID", "Logged At", "Session Date", "Room", "Booking Type", "Band Name", "Contact Name", "Contact Email", "Time / Duration", "Rate", "Rentals", "Discount", "Grand Total", "Deposit Amount", "Deposit Due"];
-const CONTACTS_SHEET_HEADERS = ["Band Name", "Contact Name", "Email", "Last Room", "Last Booked"];
+// Columns F–J are the "client memory": standing notes + a saved stage plot, with a
+// timestamp so whichever computer edited them last wins when two copies disagree.
+const CONTACTS_SHEET_HEADERS = ["Band Name", "Contact Name", "Email", "Last Room", "Last Booked", "Notes", "Stage Plot Link", "Stage Plot Name", "Stage Plot Type", "Profile Updated"];
+
+// Pulls the Drive file ID out of a webViewLink (https://drive.google.com/file/d/<id>/view…).
+function driveFileIdFromUrl(url) {
+  const m = /\/d\/([A-Za-z0-9_-]+)/.exec(url || "") || /[?&]id=([A-Za-z0-9_-]+)/.exec(url || "");
+  return m ? m[1] : null;
+}
+// Is a saved stage plot still in Drive? Only a definite "gone" (404, or in the trash)
+// returns false — any other hiccup (offline, expired token, 5xx) returns true so a
+// network blip never makes the app throw away a perfectly good saved plot.
+async function driveFileIsAvailable(token, fileUrl) {
+  const id = driveFileIdFromUrl(fileUrl);
+  if (!id || !token) return true;
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=id,trashed`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 404) return false;
+    if (!res.ok) return true;
+    const data = await res.json();
+    return !data.trashed;
+  } catch { return true; }
+}
 function slugify(str) {
   return (str || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "booking";
 }
@@ -1475,6 +1535,17 @@ const S = {
 };
 const SEL = { ...S.input, appearance: "none", WebkitAppearance: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239c9c9c'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 13px center", paddingRight: 34 };
 
+// Small labelled checkbox (same look as the "Flag for booking staff attention" one).
+function MiniCheck({ checked, onChange, children }) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer", userSelect: "none" }} onClick={() => onChange(!checked)}>
+      <div style={{ width: 18, height: 18, marginTop: 1, borderRadius: 3, border: `1px solid ${checked ? C.accent : C.border}`, background: checked ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
+        {checked && <span style={{ color: C.accentText, fontSize: 11, fontWeight: "bold", lineHeight: 1 }}>✓</span>}
+      </div>
+      <span style={{ fontSize: 13, color: C.text }}>{children}</span>
+    </label>
+  );
+}
 function Sect({ children }) {
   return <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textMuted, marginBottom: 14, paddingBottom: 9, borderBottom: `1px solid ${C.border}`, fontWeight: "500", fontFamily: FONT.mono }}>{children}</div>;
 }
@@ -1761,7 +1832,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const rows = await sheetsGetValues(token, config.contactsSheetId, "A2:E");
+        const rows = await sheetsGetValues(token, config.contactsSheetId, "A2:J");
         if (cancelled) return;
         const merged = mergeClientRecords(loadClients(), rows);
         localStorage.setItem(CLIENTS_KEY, JSON.stringify(merged.slice(0, 300)));
@@ -2054,14 +2125,49 @@ export default function App() {
     )
   );
 
+  // The saved client matching whatever email is in the booking form (if any) —
+  // drives the "replaces their current notes/plot" hints on the save checkboxes.
+  const formClient = form.contactEmail
+    ? clients.find(c => (c.email || "").toLowerCase() === form.contactEmail.trim().toLowerCase())
+    : null;
+
   const selectClient = (c) => {
     const rates = c.lastRoom ? getRoomRates(c.lastRoom) : null;
-    setForm(f => ({
-      ...f, bandName: c.band, contactName: c.name, contactEmail: c.email,
-      ...(rates ? { room: c.lastRoom, hourlyRate: rates.hourly ?? "", dailyRate: rates.daily ?? "" } : {}),
-    }));
+    const savedNotes = (c.notes || "").trim() ? c.notes : "";
+    const savedPlot = c.plotUrl ? { fileUrl: c.plotUrl, title: c.plotTitle || "Stage Plot", mimeType: c.plotMime || "" } : null;
+    setForm(f => {
+      const sameClient = !!f.autofill && (f.autofill.email || "").toLowerCase() === (c.email || "").toLowerCase();
+      let notes = f.calendarNotes;
+      let att = f.stagePlotAttachment;
+      // Switching clients: undo ONLY what we auto-filled for the previous one, and
+      // only if staff haven't touched it since — their own typing/uploads stay.
+      if (f.autofill && !sameClient) {
+        if (f.autofill.notes && notes === f.autofill.notes) notes = "";
+        if (f.autofill.plot && att && !f.stagePlotFile && att.fileUrl === f.autofill.plot) att = null;
+      }
+      const fill = sameClient ? { ...f.autofill } : { email: c.email, notes: "", plot: "" };
+      let saveNotes = sameClient ? f.saveNotesToClient : false;
+      if (savedNotes && !notes.trim()) { notes = savedNotes; fill.notes = savedNotes; saveNotes = true; }
+      if (savedPlot && !f.stagePlotFile && !att) { att = savedPlot; fill.plot = savedPlot.fileUrl; }
+      return {
+        ...f, bandName: c.band, contactName: c.name, contactEmail: c.email,
+        ...(rates ? { room: c.lastRoom, hourlyRate: rates.hourly ?? "", dailyRate: rates.daily ?? "" } : {}),
+        calendarNotes: notes, stagePlotAttachment: att, autofill: fill, saveNotesToClient: saveNotes,
+      };
+    });
     setClientSearch(c.band || c.name);
     setShowDrop(false);
+    // If the saved plot was deleted from Drive since, don't quietly attach a dead
+    // link to a calendar event — detach it and say so.
+    if (savedPlot && token) {
+      driveFileIsAvailable(token, savedPlot.fileUrl).then(ok => {
+        if (ok) return;
+        setForm(f => (f.stagePlotAttachment && !f.stagePlotFile && f.stagePlotAttachment.fileUrl === savedPlot.fileUrl)
+          ? { ...f, stagePlotAttachment: null, autofill: f.autofill ? { ...f.autofill, plot: "" } : null }
+          : f);
+        showToast(`${c.band || c.name}'s saved stage plot is no longer in Google Drive — upload a new one`, "error");
+      });
+    }
   };
 
   const total = calcTotal(form);
@@ -2093,7 +2199,7 @@ export default function App() {
     const { attachment, newlyUploaded } = await ensureStagePlotUploaded();
 
     const flagPrefix = buildFlagPrefix({
-      hasSetup: !!form.stagePlotFile || !!form.calendarNotes.trim(),
+      hasSetup: !!(form.stagePlotFile || form.stagePlotAttachment) || !!form.calendarNotes.trim(),
       hasRentals: calcRentalTotal(form) > 0,
       needsAttention: form.staffAttention,
     });
@@ -2127,7 +2233,7 @@ export default function App() {
   const buildSessionEventBody = (session, index, attachment) => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const flagPrefix = buildFlagPrefix({
-      hasSetup: !!form.stagePlotFile || !!form.calendarNotes.trim(),
+      hasSetup: !!(form.stagePlotFile || form.stagePlotAttachment) || !!form.calendarNotes.trim(),
       hasRentals: calcRentalTotal(form) > 0,
       needsAttention: form.staffAttention,
     });
@@ -2293,12 +2399,28 @@ export default function App() {
   // (matched by email) rather than a fresh row every time they book again.
   const syncContactToSheet = async (client) => {
     if (!client.email) return;
-    const rowValues = [client.band || "", client.name || "", client.email, client.lastRoom || "", client.lastBooked || ""];
+    const has = k => Object.prototype.hasOwnProperty.call(client, k);
     const writeRow = async (sheetId, sheetTitle) => {
-      const existing = await sheetsGetValues(token, sheetId, `${sheetTitle}!A:E`);
+      const existing = await sheetsGetValues(token, sheetId, `${sheetTitle}!A:J`);
+      // Sheets created before client notes/plots existed only have 5 header cells —
+      // widen the header row in place so the new columns are labelled.
+      if (existing.length > 0 && (existing[0] || []).length < CONTACTS_SHEET_HEADERS.length) {
+        await sheetsUpdateRow(token, sheetId, sheetTitle, 1, CONTACTS_SHEET_HEADERS, "RAW");
+      }
       const idx = existing.findIndex((row, i) => i > 0 && (row[2] || "").toLowerCase() === client.email.toLowerCase());
-      if (idx > 0) await sheetsUpdateRow(token, sheetId, sheetTitle, idx + 1, rowValues);
-      else await sheetsAppendRows(token, sheetId, sheetTitle, [rowValues]);
+      const prev = idx > 0 ? existing[idx] : [];
+      // Merge cell by cell instead of overwriting the row: a field this call doesn't
+      // know about (e.g. a quote has no Last Room) keeps whatever the sheet already had,
+      // rather than blanking it. Profile fields are only written when the caller
+      // explicitly supplied them (an empty string then means "clear it").
+      const keep = (v, col) => (v ? v : (prev[col] || ""));
+      const prof = (k, col) => has(k) ? (client[k] || "") : (prev[col] || "");
+      const rowValues = [
+        keep(client.band, 0), keep(client.name, 1), client.email, keep(client.lastRoom, 3), keep(client.lastBooked, 4),
+        prof("notes", 5), prof("plotUrl", 6), prof("plotTitle", 7), prof("plotMime", 8), prof("profileUpdated", 9),
+      ];
+      if (idx > 0) await sheetsUpdateRow(token, sheetId, sheetTitle, idx + 1, rowValues, "RAW");
+      else await sheetsAppendRows(token, sheetId, sheetTitle, [rowValues], "RAW");
     };
     try {
       let sheetId = config.contactsSheetId;
@@ -2306,7 +2428,7 @@ export default function App() {
       if (!sheetId) {
         const created = await sheetsCreateSpreadsheet(token, `${STUDIO_NAME} Client Contacts`);
         sheetId = created.spreadsheetId; sheetTitle = created.sheetTitle;
-        await sheetsAppendRows(token, sheetId, sheetTitle, [CONTACTS_SHEET_HEADERS]);
+        await sheetsAppendRows(token, sheetId, sheetTitle, [CONTACTS_SHEET_HEADERS], "RAW");
         updateConfig(prev => ({ ...prev, contactsSheetId: sheetId }));
       }
       try {
@@ -2315,11 +2437,52 @@ export default function App() {
         // Sheet may have been deleted from Drive — recreate once and retry.
         const recreated = await sheetsCreateSpreadsheet(token, `${STUDIO_NAME} Client Contacts`);
         sheetId = recreated.spreadsheetId; sheetTitle = recreated.sheetTitle;
-        await sheetsAppendRows(token, sheetId, sheetTitle, [CONTACTS_SHEET_HEADERS]);
+        await sheetsAppendRows(token, sheetId, sheetTitle, [CONTACTS_SHEET_HEADERS], "RAW");
         updateConfig(prev => ({ ...prev, contactsSheetId: sheetId }));
         await writeRow(sheetId, sheetTitle);
       }
     } catch (e) { console.error("Contacts sync:", e); }
+  };
+
+  // What a booking should save onto the client's profile: the notes (if the box
+  // is ticked and there are any) and a NEWLY uploaded stage plot (if ticked). An
+  // auto-attached saved plot has no file chosen, so it's never "re-saved". Only keys
+  // that are actually being saved are included — the contacts-sheet sync leaves
+  // every other profile cell alone — plus a timestamp so the newest edit wins.
+  const clientProfileFields = (fallbackPlot) => {
+    const out = {};
+    const notes = (form.calendarNotes || "").trim();
+    if (form.saveNotesToClient && notes) out.notes = notes;
+    const plot = form.stagePlotFile ? (form.stagePlotAttachment || fallbackPlot) : null;
+    if (form.savePlotToClient && plot && plot.fileUrl) {
+      out.plotUrl = plot.fileUrl; out.plotTitle = plot.title || "Stage Plot"; out.plotMime = plot.mimeType || "";
+    }
+    if (Object.keys(out).length > 0) out.profileUpdated = new Date().toISOString();
+    return out;
+  };
+
+  // Edits from the Clients tab: saves locally, and to the shared sheet if connected.
+  const saveClientProfile = (email, patch) => {
+    const stamped = { ...patch, profileUpdated: new Date().toISOString() };
+    persistClient({ email, ...stamped });
+    setClients(loadClients());
+    if (token) syncContactToSheet({ email, ...stamped });
+    else showToast("Saved on this computer only — connect Google to share it with the shared Contacts sheet", "success");
+  };
+  const [editingClientEmail, setEditingClientEmail] = useState(null);
+  const [uploadingClientPlot, setUploadingClientPlot] = useState(false);
+  const replaceClientPlot = async (c, file) => {
+    if (!file) return;
+    if (!token) { showToast("Connect Google first to upload a stage plot", "error"); return; }
+    setUploadingClientPlot(true);
+    try {
+      const uploaded = await driveUploadFile(token, file);
+      saveClientProfile(c.email, { plotUrl: uploaded.fileUrl, plotTitle: `Stage Plot — ${uploaded.title}`, plotMime: uploaded.mimeType });
+    } catch (e) {
+      console.error("Client plot upload:", e);
+      if (!isAuthExpired(e)) showToast("Stage plot upload failed", "error");
+    }
+    setUploadingClientPlot(false);
   };
 
   // Fetches the relevant policy PDF's bytes from Drive and shapes them into
@@ -2385,7 +2548,7 @@ export default function App() {
       } catch (e) { console.error("Gmail:", e); }
 
       const lastSession = form.sessions[form.sessions.length - 1];
-      const clientRecord = { band: form.bandName, name: form.contactName, email: form.contactEmail, lastBooked: lastSession?.eventDate, lastRoom: lastSession?.room };
+      const clientRecord = { band: form.bandName, name: form.contactName, email: form.contactEmail, lastBooked: lastSession?.eventDate, lastRoom: lastSession?.room, ...clientProfileFields() };
       persistClient(clientRecord);
       setClients(loadClients());
       logBookingToSheet(form); // best-effort — logged regardless of partial failures, so there's still a paper trail
@@ -2398,12 +2561,14 @@ export default function App() {
     const subject = `${STUDIO_NAME} — Booking Confirmed: ${form.bandName} | ${fmtDate(form.eventDate)}`;
     const htmlBody = buildEmailHTML(form);
 
+    let fallbackPlot = null;
     try {
       if (form.createdEventId) {
         await googleCalendarPatch(token, form.createdEventCalendarId, form.createdEventId, { status: "confirmed" });
       } else {
         // Fallback in case Preview's write somehow never landed
-        const { event } = await buildEventBody();
+        const { event, newlyUploaded } = await buildEventBody();
+        fallbackPlot = newlyUploaded;
         await googleCalendarCreate(token, location.calendarId, { ...event, status: "confirmed" });
       }
       calOk = true;
@@ -2421,7 +2586,7 @@ export default function App() {
       emailOk = true;
     } catch (e) { console.error("Gmail:", e); }
 
-    const clientRecord = { band: form.bandName, name: form.contactName, email: form.contactEmail, lastBooked: form.eventDate, lastRoom: form.room };
+    const clientRecord = { band: form.bandName, name: form.contactName, email: form.contactEmail, lastBooked: form.eventDate, lastRoom: form.room, ...clientProfileFields(fallbackPlot) };
     persistClient(clientRecord);
     setClients(loadClients());
     logBookingToSheet(form); // best-effort — logged regardless of partial failures, so there's still a paper trail
@@ -3111,15 +3276,38 @@ export default function App() {
                   {form.stagePlotFile ? (
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3 }}>
                       <span style={{ fontSize: 13, color: C.text }}>📎 {form.stagePlotFile.name}</span>
-                      <button onClick={() => setForm(f => ({ ...f, stagePlotFile: null, stagePlotAttachment: null }))} style={{ background: "transparent", border: "none", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase" }}>Remove</button>
+                      <button onClick={() => setForm(f => ({ ...f, stagePlotFile: null, stagePlotAttachment: null, autofill: f.autofill ? { ...f.autofill, plot: "" } : null }))} style={{ background: "transparent", border: "none", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase" }}>Remove</button>
+                    </div>
+                  ) : form.stagePlotAttachment ? (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "10px 14px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+                      <span style={{ fontSize: 13, color: C.text }}>
+                        📎 {(form.stagePlotAttachment.title || "Stage Plot").replace(/^Stage Plot — /, "")}{" "}
+                        <span style={{ color: C.textFaint }}>— {form.autofill?.plot ? `saved plot, attached automatically` : "saved plot"}</span>
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                        <a href={form.stagePlotAttachment.fileUrl} target="_blank" rel="noreferrer" style={{ color: C.info, fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase", textDecoration: "none" }}>View</a>
+                        <label style={{ color: C.textMuted, cursor: "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase" }}>
+                          Replace
+                          <input type="file" accept="image/*,.pdf" onChange={e => { const file = e.target.files[0]; if (file) setForm(f => ({ ...f, stagePlotFile: file, stagePlotAttachment: null, autofill: f.autofill ? { ...f.autofill, plot: "" } : null })); }} style={{ display: "none" }} />
+                        </label>
+                        <button onClick={() => setForm(f => ({ ...f, stagePlotAttachment: null, autofill: f.autofill ? { ...f.autofill, plot: "" } : null }))} style={{ background: "transparent", border: "none", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase", padding: 0 }}>Remove</button>
+                      </span>
                     </div>
                   ) : (
                     <label style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "18px", background: C.surface2, border: `1px dashed ${C.border}`, borderRadius: 3, cursor: "pointer", fontSize: 13, color: C.textMuted }}>
                       📎 Upload a stage plot (image or PDF)
-                      <input type="file" accept="image/*,.pdf" onChange={e => setForm(f => ({ ...f, stagePlotFile: e.target.files[0] || null, stagePlotAttachment: null }))} style={{ display: "none" }} />
+                      <input type="file" accept="image/*,.pdf" onChange={e => { const file = e.target.files[0] || null; setForm(f => ({ ...f, stagePlotFile: file, stagePlotAttachment: null })); }} style={{ display: "none" }} />
                     </label>
                   )}
-                  <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 6 }}>Attached to the calendar event for whoever's running sound — not included in the client email.</div>
+                  {form.stagePlotFile && form.contactEmail && (
+                    <div style={{ marginTop: 10 }}>
+                      <MiniCheck checked={form.savePlotToClient} onChange={v => setF("savePlotToClient", v)}>
+                        Save as {form.bandName ? `${form.bandName}'s` : "this client's"} stage plot
+                        <span style={{ color: C.textFaint }}> — attaches automatically next time{formClient?.plotUrl ? " (replaces the one on file)" : ""}</span>
+                      </MiniCheck>
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 6 }}>Attached to the calendar event for whoever's running sound — not included in the client email.{form.stagePlotAttachment && !form.stagePlotFile ? " Remove only detaches it from this booking; the saved plot stays on the client." : ""}</div>
                 </div>
 
                 <Sect>Email Greeting</Sect>
@@ -3138,6 +3326,17 @@ export default function App() {
                     placeholder="Special setup, access codes, parking, rider notes, internal reminders…"
                     rows={3}
                     style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" }} />
+                  {form.autofill?.notes && form.calendarNotes === form.autofill.notes && (
+                    <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 6 }}>Filled in from {form.bandName ? `${form.bandName}'s` : "this client's"} saved notes.</div>
+                  )}
+                  {form.contactEmail && form.calendarNotes.trim() && (
+                    <div style={{ marginTop: 10 }}>
+                      <MiniCheck checked={form.saveNotesToClient} onChange={v => setF("saveNotesToClient", v)}>
+                        Save these notes to {form.bandName ? `${form.bandName}'s` : "this client's"} profile
+                        <span style={{ color: C.textFaint }}> — {formClient?.notes ? "replaces their current standing notes" : "fills in automatically next time they book"}</span>
+                      </MiniCheck>
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ marginBottom: 30 }}>
@@ -3149,9 +3348,9 @@ export default function App() {
                   </label>
                 </div>
 
-                {(form.stagePlotFile || form.calendarNotes.trim() || calcRentalTotal(form) > 0 || form.staffAttention) && (
+                {(form.stagePlotFile || form.stagePlotAttachment || form.calendarNotes.trim() || calcRentalTotal(form) > 0 || form.staffAttention) && (
                   <div style={{ marginBottom: 24, padding: "10px 14px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, fontSize: 12, color: C.textMuted, fontFamily: FONT.mono }}>
-                    Calendar title will show: <span style={{ color: C.text }}>{buildFlagPrefix({ hasSetup: !!form.stagePlotFile || !!form.calendarNotes.trim(), hasRentals: calcRentalTotal(form) > 0, needsAttention: form.staffAttention })}{form.bandName || "…"}</span>
+                    Calendar title will show: <span style={{ color: C.text }}>{buildFlagPrefix({ hasSetup: !!(form.stagePlotFile || form.stagePlotAttachment) || !!form.calendarNotes.trim(), hasRentals: calcRentalTotal(form) > 0, needsAttention: form.staffAttention })}{form.bandName || "…"}</span>
                   </div>
                 )}
 
@@ -3415,6 +3614,15 @@ export default function App() {
                     <input type="email" value={quoteForm.contactEmail} onChange={e => setQF("contactEmail", e.target.value)} style={S.input} />
                   </div>
                 </div>
+                {(() => {
+                  const qc = quoteForm.contactEmail ? clients.find(c => (c.email || "").toLowerCase() === quoteForm.contactEmail.trim().toLowerCase()) : null;
+                  return qc && (qc.notes || "").trim() ? (
+                    <div style={{ marginTop: -8, marginBottom: 20, padding: "10px 14px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, fontSize: 12.5, color: C.textMuted, whiteSpace: "pre-wrap" }}>
+                      <span style={{ fontFamily: FONT.mono, fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint }}>📝 Notes on file for {qc.band || qc.name || qc.email}</span>
+                      {"\n"}{qc.notes}
+                    </div>
+                  ) : null;
+                })()}
 
                 <label style={S.label}>Booking Type *</label>
                 <div style={{ background: C.surface3, borderRadius: 3, padding: 3, display: "flex", border: `1px solid ${C.border}`, width: 260, marginBottom: 22 }}>
@@ -3765,24 +3973,59 @@ export default function App() {
         {tab === "clients" && (
           <div style={{ background: C.surface, borderRadius: 4, border: `1px solid ${C.border}`, padding: "32px 36px" }}>
             <Sect>Saved Clients ({clients.length})</Sect>
-            <p style={{ color: C.textMuted, fontSize: 13.5, marginTop: -8, marginBottom: 22 }}>Auto-saved after each confirmed booking. Click any client to pre-fill a new booking.</p>
+            <p style={{ color: C.textMuted, fontSize: 13.5, marginTop: -8, marginBottom: 22 }}>Auto-saved after each confirmed booking. Click any client to pre-fill a new booking — their saved notes and stage plot come with them. Use <b>Notes &amp; plot</b> to edit what's saved.</p>
             {clients.length === 0
               ? <div style={{ color: C.textFaint, fontSize: 14, padding: "20px 0" }}>No saved clients yet. Complete a booking to save one.</div>
               : clients.map((c, i) => (
-                <div key={i} onClick={() => { setTab("booking"); resetForm(); setTimeout(() => selectClient(c), 50); }}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, marginBottom: 8, cursor: "pointer", transition: "all 0.15s" }}
+                <div key={c.email || i} style={{ marginBottom: 8 }}>
+                <div onClick={() => { setTab("booking"); resetForm(); setTimeout(() => selectClient(c), 50); }}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, padding: "14px 18px", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, cursor: "pointer", transition: "all 0.15s" }}
                   onMouseEnter={e => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.background = C.surface2; }}
                   onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.surface3; }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: "500", color: C.text, marginBottom: 2 }}>{c.band}</div>
+                    <div style={{ fontSize: 14, fontWeight: "500", color: C.text, marginBottom: 2 }}>{c.band} {(c.notes || "").trim() && <span title="Has saved notes">📝</span>} {c.plotUrl && <span title="Has a saved stage plot">📎</span>}</div>
                     <div style={{ fontSize: 12, color: C.textMuted }}>{c.name} · {c.email}</div>
                   </div>
-                  {c.lastBooked && (
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 11.5, color: C.textFaint }}>Last booked {fmtDate(c.lastBooked)}</div>
-                      {c.lastRoom && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{c.lastRoom}</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    {c.lastBooked && (
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 11.5, color: C.textFaint }}>Last booked {fmtDate(c.lastBooked)}</div>
+                        {c.lastRoom && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{c.lastRoom}</div>}
+                      </div>
+                    )}
+                    <button onClick={e => { e.stopPropagation(); setEditingClientEmail(editingClientEmail === c.email ? null : c.email); }}
+                      style={{ background: "transparent", border: `1px solid ${editingClientEmail === c.email ? C.accent : C.border}`, color: editingClientEmail === c.email ? C.accent : C.textMuted, padding: "6px 12px", borderRadius: 3, cursor: "pointer", fontFamily: FONT.mono, fontSize: 10.5, letterSpacing: "0.04em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                      Notes &amp; plot
+                    </button>
+                  </div>
+                </div>
+                {editingClientEmail === c.email && (
+                  <div style={{ padding: "16px 18px", background: C.surface2, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 3px 3px" }}>
+                    <label style={S.label}>Standing notes (fill in automatically whenever {c.band || "this client"} is picked for a booking)</label>
+                    <textarea key={`${c.email}:${c.profileUpdated || ""}`} defaultValue={c.notes || ""} rows={4}
+                      placeholder="Anything that's always true for this client — setup preferences, access, rider notes…"
+                      onBlur={e => { const v = e.target.value.trim(); if (v !== (c.notes || "").trim()) saveClientProfile(c.email, { notes: v }); }}
+                      style={{ width: "100%", background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, padding: "11px 13px", fontSize: 13, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box", marginBottom: 14 }} />
+                    <label style={S.label}>Saved stage plot</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+                      {c.plotUrl ? (
+                        <>
+                          <span style={{ fontSize: 13, color: C.text }}>📎 {(c.plotTitle || "Stage Plot").replace(/^Stage Plot — /, "")}</span>
+                          <a href={c.plotUrl} target="_blank" rel="noreferrer" style={{ color: C.info, fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase", textDecoration: "none" }}>View</a>
+                        </>
+                      ) : <span style={{ fontSize: 13, color: C.textFaint }}>None saved yet</span>}
+                      <label style={{ color: C.textMuted, cursor: uploadingClientPlot ? "default" : "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase", opacity: uploadingClientPlot ? 0.5 : 1 }}>
+                        {uploadingClientPlot ? "Uploading…" : c.plotUrl ? "Replace" : "Upload"}
+                        <input type="file" accept="image/*,.pdf" disabled={uploadingClientPlot} onChange={e => { const f = e.target.files[0]; e.target.value = ""; replaceClientPlot(c, f); }} style={{ display: "none" }} />
+                      </label>
+                      {c.plotUrl && (
+                        <button onClick={() => saveClientProfile(c.email, { plotUrl: "", plotTitle: "", plotMime: "" })}
+                          style={{ background: "transparent", border: "none", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: FONT.mono, textTransform: "uppercase", padding: 0 }}>Remove</button>
+                      )}
                     </div>
-                  )}
+                    <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 8 }}>Notes save when you click out of the box. Changes are shared with the Contacts sheet (and so with Bob) when Google is connected. Removing a plot only un-links it — the file stays in Google Drive.</div>
+                  </div>
+                )}
                 </div>
               ))}
           </div>
